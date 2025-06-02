@@ -1,0 +1,23 @@
+# Node.js 依賴
+node_modules/
+package-lock.json
+# SQLite 資料庫文件
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+# 自動生成的資料庫相關文件
+migrations/
+db.ts
+knex.ts
+knexfile.ts
+proxy.ts
+# 構建輸出
+dist/
+# 上傳文件
+uploads/
+*.tgz
+.env
+.env.*
+!.env.example
+dump.sql
+*.xz

@@ -1,0 +1,6 @@
+2025-06-02T10:11:38.179Z - Starting image collection and processing
+2025-06-02T10:11:38.195Z - Initialized SQLite database at image_data.db
+2025-06-02T10:11:39.141Z - Starting image search for keyword: "various dog breeds"
+2025-06-02T10:11:45.517Z - No more images to load
+2025-06-02T10:11:45.519Z - Collected 0 image metadata entries
+2025-06-02T10:11:45.604Z - Collected 0 images, less than required 3000
