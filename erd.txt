@@ -15,12 +15,29 @@
 ////////////////////////////////////
 
 
+user
+----
+id integer PK
+username varchar(32)
+password varchar(255)
+avatar varchar(50) NULL
+email varchar(255) NULL
+
+
+session
+-------
+id integer PK
+token text
+user_id integer FK >0- user.id
+
+
 images
 ------
 id integer PK
-src text
+src text NOT NULL
 alt text NULL
 filename text
+user_id integer NULL FK >0- user.id
 
 
 # zoom: 1.000
@@ -33,3 +50,4 @@ filename text
 # table-text: #000000
 # user (855, 440)
 # session (855, 440)
+# images (855, 540)

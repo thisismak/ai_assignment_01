@@ -1,13 +1,13 @@
-import { chromium, Browser, Page } from '@playwright/test';
+import { chromium, Page } from '@playwright/test';
 import axios from 'axios';
 import sharp from 'sharp';
-import Database from 'better-sqlite3';
+import sqlite3 from 'sqlite3';
 import { existsSync, mkdirSync, unlinkSync, writeFileSync, appendFileSync } from 'fs';
 import { join } from 'path';
 
 // 配置
 const OUTPUT_DIR = 'dog_images';
-const DB_PATH = 'image_data.db';
+const DB_PATH = 'db.sqlite3'; // 與 server.ts 共用
 const LOG_PATH = 'log.txt';
 const MAX_IMAGES = 5000;
 const MIN_IMAGES = 3000;
@@ -46,24 +46,32 @@ interface ImageData {
   filename: string | null;
 }
 
-// 數據庫查詢結果接口
-interface CountResult {
-  count: number;
-}
-
-// 初始化數據庫
-function initDatabase(): Database.Database {
-  const db = new Database(DB_PATH);
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS images (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      src TEXT NOT NULL,
-      alt TEXT,
-      filename TEXT
-    )
-  `);
-  logMessage('Initialized SQLite database at ' + DB_PATH);
-  return db;
+// 初始化資料庫
+function initDatabase(callback: (err: Error | null, db: sqlite3.Database) => void): void {
+  const db = new sqlite3.Database(DB_PATH, (err) => {
+    if (err) {
+      logMessage(`Database connection error: ${err.message}`);
+      callback(err, db);
+      return;
+    }
+    logMessage('Connected to SQLite database at ' + DB_PATH);
+    db.run(`
+      CREATE TABLE IF NOT EXISTS images (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        src TEXT NOT NULL,
+        alt TEXT,
+        filename TEXT
+      )
+    `, (err) => {
+      if (err) {
+        logMessage(`Table creation error: ${err.message}`);
+        callback(err, db);
+        return;
+      }
+      logMessage('Initialized images table');
+      callback(null, db);
+    });
+  });
 }
 
 // 搜集圖像元數據
@@ -71,20 +79,18 @@ async function searchImages(page: Page, keyword: string, maxImages: number): Pro
   logMessage(`Starting image search for keyword: "${keyword}"`);
   const imagesData: ImageData[] = [];
 
-  // 設置用戶代理和視口以模擬真實瀏覽器
   await page.setExtraHTTPHeaders({
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
   });
   await page.setViewportSize({ width: 1280, height: 720 });
 
-  // 訪問 Google 圖片搜索
   try {
     await page.goto(`https://www.google.com/search?q=${encodeURIComponent(keyword)}&tbm=isch`, {
       waitUntil: 'domcontentloaded',
       timeout: 30000,
     });
     logMessage('Successfully loaded Google Images page');
-    await page.screenshot({ path: 'google_images_screenshot.png' }); // 調試截圖
+    await page.screenshot({ path: 'google_images_screenshot.png' });
   } catch (error: any) {
     logMessage(`Failed to load Google Images page: ${error.message}`);
     return imagesData;
@@ -92,34 +98,30 @@ async function searchImages(page: Page, keyword: string, maxImages: number): Pro
 
   let lastCount = 0;
   let scrollAttempts = 0;
-  const maxScrollAttempts = 20; // 限制滾動次數，避免無限循環
+  const maxScrollAttempts = 20;
 
   while (imagesData.length < maxImages && scrollAttempts < maxScrollAttempts) {
-    // 嘗試點擊「顯示更多」按鈕
     const moreButton = await page.$('input[value="Show more"]');
     if (moreButton) {
       logMessage('Clicking "Show more" button');
       await moreButton.click();
-      await page.waitForTimeout(5000); // 增加等待時間
+      await page.waitForTimeout(5000);
     } else {
       await page.evaluate('window.scrollBy(0, 1000)');
-      await page.waitForTimeout(5000); // 增加等待時間
+      await page.waitForTimeout(5000);
     }
 
-    // 選擇圖片元素，支持 src 和 data-src
     const imgElements = await page.$$('img');
     logMessage(`Found ${imgElements.length} img elements on page`);
     for (const img of imgElements) {
       const src = (await img.getAttribute('data-src')) || (await img.getAttribute('src'));
       const alt = await img.getAttribute('alt');
-      logMessage(`Checking image: src=${src}, alt=${alt}`); // 調試圖片屬性
+      logMessage(`Checking image: src=${src}, alt=${alt}`);
       if (src && (src.startsWith('http') || src.startsWith('https')) && imagesData.length < maxImages) {
-        // 放寬條件，支持 https，移除 gstatic.com 過濾以測試
         imagesData.push({ src, alt: alt || null, filename: null });
       }
     }
 
-    // 檢查是否還有新圖片
     if (imagesData.length === lastCount && !moreButton) {
       logMessage('No more images to load');
       break;
@@ -143,9 +145,8 @@ async function downloadImage(src: string, filename: string): Promise<boolean> {
     }
     logMessage(`Failed to download image: ${src} (status: ${response.status})`);
     return false;
-  } catch (err: unknown) {
-    const error = err as Error;
-    logMessage(`Download image ${src} failed: ${error.message}`);
+  } catch (err: any) {
+    logMessage(`Download image ${src} failed: ${err.message}`);
     return false;
   }
 }
@@ -169,9 +170,8 @@ async function processImage(inputPath: string, outputPath: string): Promise<bool
     }
     logMessage(`Image ${inputPath} could not be compressed below ${MAX_SIZE_KB}KB`);
     return false;
-  } catch (err: unknown) {
-    const error = err as Error;
-    logMessage(`Process image ${inputPath} failed: ${error.message}`);
+  } catch (err: any) {
+    logMessage(`Process image ${inputPath} failed: ${err.message}`);
     return false;
   }
 }
@@ -179,53 +179,106 @@ async function processImage(inputPath: string, outputPath: string): Promise<bool
 // 主函數
 async function main() {
   logMessage('Starting image collection and processing');
-  const db = initDatabase();
-
-  // 初始化 Playwright
-  const browser = await chromium.launch({ headless: false }); // 設為 false 以便調試
-  const page = await browser.newPage();
-
-  // 搜集圖像
-  const imagesData = await searchImages(page, KEYWORD, MAX_IMAGES);
-  await browser.close();
-
-  if (imagesData.length < MIN_IMAGES) {
-    logMessage(`Collected ${imagesData.length} images, less than required ${MIN_IMAGES}`);
-    db.close();
-    return;
-  }
-
-  // 下載並處理圖像
-  let processedCount = 0;
-  const insertStmt = db.prepare('INSERT INTO images (src, alt, filename) VALUES (?, ?, ?)');
-  for (let i = 0; i < imagesData.length && processedCount < MAX_IMAGES; i++) {
-    const image = imagesData[i];
-    const filename = join(OUTPUT_DIR, `dog_${processedCount + 1}.jpg`);
-    const tempFilename = join(OUTPUT_DIR, `temp_${processedCount + 1}.jpg`);
-
-    if (await downloadImage(image.src, tempFilename)) {
-      if (await processImage(tempFilename, filename)) {
-        insertStmt.run(image.src, image.alt, filename);
-        image.filename = filename;
-        processedCount++;
-      }
-      if (existsSync(tempFilename)) {
-        unlinkSync(tempFilename);
-      }
+  initDatabase(async (err, db) => {
+    if (err) {
+      logMessage(`Failed to initialize database: ${err.message}`);
+      return;
     }
-  }
 
-  // 統計圖像數量
-  const result = db.prepare('SELECT COUNT(*) as count FROM images').get() as CountResult;
-  const totalImages = result.count;
-  logMessage(`Successfully processed ${processedCount} images. Total in database: ${totalImages}`);
+    try {
+      const browser = await chromium.launch({ headless: false });
+      const page = await browser.newPage();
+      const imagesData = await searchImages(page, KEYWORD, MAX_IMAGES);
+      await browser.close();
 
-  // 關閉數據庫
-  db.close();
+      if (imagesData.length < MIN_IMAGES) {
+        logMessage(`Collected ${imagesData.length} images, less than required ${MIN_IMAGES}`);
+        db.close((err) => {
+          if (err) logMessage(`Database close error: ${err.message}`);
+        });
+        return;
+      }
+
+      let processedCount = 0;
+      db.run('BEGIN TRANSACTION', (err) => {
+        if (err) {
+          logMessage(`Transaction start error: ${err.message}`);
+          db.close((err) => {
+            if (err) logMessage(`Database close error: ${err.message}`);
+          });
+          return;
+        }
+
+        const processNextImage = async (index: number) => {
+          if (index >= imagesData.length || processedCount >= MAX_IMAGES) {
+            db.run('COMMIT', (err) => {
+              if (err) {
+                logMessage(`Transaction commit error: ${err.message}`);
+                db.close((err) => {
+                  if (err) logMessage(`Database close error: ${err.message}`);
+                });
+                return;
+              }
+              db.get('SELECT COUNT(*) as count FROM images', (err, result: { count: number }) => {
+                if (err) {
+                  logMessage(`Count query error: ${err.message}`);
+                  db.close((err) => {
+                    if (err) logMessage(`Database close error: ${err.message}`);
+                  });
+                  return;
+                }
+                logMessage(`Successfully processed ${processedCount} images. Total in database: ${result.count}`);
+                db.close((err) => {
+                  if (err) logMessage(`Database close error: ${err.message}`);
+                });
+              });
+            });
+            return;
+          }
+
+          const image = imagesData[index];
+          const filename = join(OUTPUT_DIR, `dog_${processedCount + 1}.jpg`);
+          const tempFilename = join(OUTPUT_DIR, `temp_${processedCount + 1}.jpg`);
+
+          if (await downloadImage(image.src, tempFilename)) {
+            if (await processImage(tempFilename, filename)) {
+              db.run('INSERT INTO images (src, alt, filename) VALUES (?, ?, ?)', [image.src, image.alt, filename], (err) => {
+                if (err) {
+                  logMessage(`Insert image error: ${err.message}`);
+                } else {
+                  image.filename = filename;
+                  processedCount++;
+                }
+                if (existsSync(tempFilename)) {
+                  unlinkSync(tempFilename);
+                }
+                processNextImage(index + 1);
+              });
+            } else {
+              if (existsSync(tempFilename)) {
+                unlinkSync(tempFilename);
+              }
+              processNextImage(index + 1);
+            }
+          } else {
+            processNextImage(index + 1);
+          }
+        };
+
+        processNextImage(0);
+      });
+    } catch (err: any) {
+      logMessage(`Main execution failed: ${err.message}`);
+      db.run('ROLLBACK', () => {
+        db.close((err) => {
+          if (err) logMessage(`Database close error: ${err.message}`);
+        });
+      });
+    }
+  });
 }
 
 // 執行主函數
-main().catch((err: unknown) => {
-  const error = err as Error;
-  logMessage(`Main execution failed: ${error.message}`);
+main().catch((err: any) => {
+  logMessage(`Main execution failed: ${err.message}`);
 });
