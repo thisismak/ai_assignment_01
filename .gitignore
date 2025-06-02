@@ -7,6 +7,7 @@ package-lock.json
 *.sqlite3-wal
 # 自動生成的資料庫相關文件
 migrations/
+dog_images/
 db.ts
 knex.ts
 knexfile.ts
@@ -21,3 +22,4 @@ uploads/
 !.env.example
 dump.sql
 *.xz
+google_images_screenshot.png

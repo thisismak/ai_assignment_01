@@ -16,9 +16,19 @@ const TARGET_SIZE = { width: 500, height: 500 };
 const QUALITY_RANGE = { min: 50, max: 80 };
 const KEYWORD = 'various dog breeds';
 
-// 日誌函數
+// 日誌函數（使用香港時間）
 function logMessage(message: string): void {
-  const timestamp = new Date().toISOString();
+  const timestamp = new Date().toLocaleString('zh-HK', {
+    timeZone: 'Asia/Hong_Kong',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    fractionalSecondDigits: 3,
+    hour12: false,
+  });
   const logEntry = `${timestamp} - ${message}\n`;
   console.log(message);
   appendFileSync(LOG_PATH, logEntry);
@@ -60,30 +70,64 @@ function initDatabase(): Database.Database {
 async function searchImages(page: Page, keyword: string, maxImages: number): Promise<ImageData[]> {
   logMessage(`Starting image search for keyword: "${keyword}"`);
   const imagesData: ImageData[] = [];
-  await page.goto(`https://www.google.com/search?q=${encodeURIComponent(keyword)}&tbm=isch`, {
-    waitUntil: 'domcontentloaded',
+
+  // 設置用戶代理和視口以模擬真實瀏覽器
+  await page.setExtraHTTPHeaders({
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
   });
+  await page.setViewportSize({ width: 1280, height: 720 });
 
-  let lastHeight = await page.evaluate('document.body.scrollHeight');
-  while (imagesData.length < maxImages) {
-    await page.evaluate('window.scrollBy(0, 1000)');
-    await page.waitForTimeout(3000); // 增加延遲以應對反爬蟲
-    const newHeight = await page.evaluate('document.body.scrollHeight');
-    if (newHeight === lastHeight) {
-      logMessage('No more images to load');
-      break;
+  // 訪問 Google 圖片搜索
+  try {
+    await page.goto(`https://www.google.com/search?q=${encodeURIComponent(keyword)}&tbm=isch`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 30000,
+    });
+    logMessage('Successfully loaded Google Images page');
+    await page.screenshot({ path: 'google_images_screenshot.png' }); // 調試截圖
+  } catch (error: any) {
+    logMessage(`Failed to load Google Images page: ${error.message}`);
+    return imagesData;
+  }
+
+  let lastCount = 0;
+  let scrollAttempts = 0;
+  const maxScrollAttempts = 20; // 限制滾動次數，避免無限循環
+
+  while (imagesData.length < maxImages && scrollAttempts < maxScrollAttempts) {
+    // 嘗試點擊「顯示更多」按鈕
+    const moreButton = await page.$('input[value="Show more"]');
+    if (moreButton) {
+      logMessage('Clicking "Show more" button');
+      await moreButton.click();
+      await page.waitForTimeout(5000); // 增加等待時間
+    } else {
+      await page.evaluate('window.scrollBy(0, 1000)');
+      await page.waitForTimeout(5000); // 增加等待時間
     }
-    lastHeight = newHeight;
 
+    // 選擇圖片元素，支持 src 和 data-src
     const imgElements = await page.$$('img');
+    logMessage(`Found ${imgElements.length} img elements on page`);
     for (const img of imgElements) {
-      const src = await img.getAttribute('src');
+      const src = (await img.getAttribute('data-src')) || (await img.getAttribute('src'));
       const alt = await img.getAttribute('alt');
-      if (src && src.startsWith('http') && imagesData.length < maxImages) {
+      logMessage(`Checking image: src=${src}, alt=${alt}`); // 調試圖片屬性
+      if (src && (src.startsWith('http') || src.startsWith('https')) && imagesData.length < maxImages) {
+        // 放寬條件，支持 https，移除 gstatic.com 過濾以測試
         imagesData.push({ src, alt: alt || null, filename: null });
       }
     }
+
+    // 檢查是否還有新圖片
+    if (imagesData.length === lastCount && !moreButton) {
+      logMessage('No more images to load');
+      break;
+    }
+    lastCount = imagesData.length;
+    scrollAttempts++;
   }
+
   logMessage(`Collected ${imagesData.length} image metadata entries`);
   return imagesData;
 }
@@ -138,7 +182,7 @@ async function main() {
   const db = initDatabase();
 
   // 初始化 Playwright
-  const browser = await chromium.launch({ headless: true });
+  const browser = await chromium.launch({ headless: false }); // 設為 false 以便調試
   const page = await browser.newPage();
 
   // 搜集圖像
