@@ -10,12 +10,15 @@ const OUTPUT_DIR = 'dog_images';
 const DB_PATH = 'db.sqlite3';
 const LOG_PATH = 'log.txt';
 const MAX_IMAGES = 5000;
-const MIN_IMAGES = 3000; // Lowered for testing
+const MIN_IMAGES = 3000;
 const MAX_SIZE_KB = 50;
 const TARGET_SIZE = { width: 500, height: 500 };
 const QUALITY_RANGE = { min: 50, max: 80 };
-const KEYWORDS = ['specific dog breeds photos', 'purebred dog images', 'different dog breeds portraits', 'dogs', 'dog photos'];
-const DOG_RELATED_TERMS = ['dog', 'breed', 'puppy', 'canine', 'labrador', 'poodle', 'bulldog'];
+const DOG_RELATED_TERMS = [
+  'dog', 'breed', 'puppy', 'canine', 
+  'labrador', 'golden retriever', 'german shepherd', 'poodle', 'bulldog', 'beagle', 'husky', 'chihuahua',
+  'doggy', 'pet', '純種狗', '狗狗', '寵物狗'
+];
 const USER_AGENTS = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Safari/605.1.15',
@@ -84,63 +87,67 @@ async function searchImages(page: Page, keyword: string, maxImages: number): Pro
         timeout: 30000,
       });
       logMessage('Successfully loaded Google Images page');
-      await page.screenshot({ path: `google_images_screenshot_${keyword}}.jpg` });
+      await page.screenshot({ path: `google_images_screenshot_${keyword.replace(/\s+/g, '_')}.jpg` });
       break;
     } catch (error: any) {
       logMessage(`Failed to load Google Images page (Retry ${4 - retries}): ${error.message}`);
       retries--;
       if (retries > 0) await page.waitForTimeout(5000);
+      else {
+        logMessage('Failed to load Google Images after retries');
+        return imagesData;
+      }
     }
-  }
-
-  if (retries === 0) {
-    logMessage('Failed to load Google Images after retries');
-    return imagesData;
   }
 
   let lastCount = 0;
   let scrollAttempts = 0;
-  const maxScrollAttempts = 50;
+  const maxScrollAttempts = 100;
 
   while (imagesData.length < maxImages && scrollAttempts < maxScrollAttempts) {
-    const moreButton = await page.$('input[value="Show more"]');
-    if (moreButton) {
-      logMessage('Clicking "Show more" button');
-      await moreButton.click();
-      await page.waitForTimeout(2000); // Reduced delay
-    } else {
-      await page.evaluate('window.scrollBy(0, 1000)');
-      await page.waitForTimeout(2000);
-    }
-
-    const imgElements = await page.$$('img');
-    logMessage(`Found ${imgElements.length} img elements on page`);
-    for (const img of imgElements) {
-      const src = (await img.getAttribute('data-src')) || (await img.getAttribute('src'));
-      const alt = await img.getAttribute('alt');
-      if (
-        src &&
-        (src.startsWith('http') || src.startsWith('https')) &&
-        imagesData.length < maxImages
-      ) {
-        // Relaxed alt text filter
-        if (!alt || DOG_RELATED_TERMS.some((term) => alt.toLowerCase().includes(term))) {
-          imagesData.push({ src, alt: alt || null, filename: null });
-          logMessage(`Accepted image: src=${src}, alt=${alt}`);
-        } else {
-          logMessage(`Skipped image due to alt: src=${src}, alt=${alt}`);
-        }
+    try {
+      const moreButton = await page.$('input[value="Show more"]');
+      if (moreButton) {
+        logMessage('Clicking "Show more" button');
+        await moreButton.click();
+        await page.waitForTimeout(3000);
       } else {
-        logMessage(`Skipped image: src=${src}, alt=${alt}`);
+        await page.evaluate('window.scrollBy(0, 1000)');
+        await page.waitForTimeout(3000);
       }
-    }
 
-    if (imagesData.length === lastCount && !moreButton) {
-      logMessage('No more images to load');
+      const imgElements = await page.$$('img');
+      logMessage(`Found ${imgElements.length} img elements on page`);
+      for (const img of imgElements) {
+        const src = (await img.getAttribute('data-src')) || (await img.getAttribute('src'));
+        const alt = await img.getAttribute('alt');
+        if (
+          src &&
+          (src.startsWith('http') || src.startsWith('https')) &&
+          imagesData.length < maxImages &&
+          !imagesData.some((imgData) => imgData.src === src)
+        ) {
+          if (!alt || DOG_RELATED_TERMS.some((term) => alt.toLowerCase().includes(term))) {
+            imagesData.push({ src, alt: alt || null, filename: null });
+            logMessage(`Accepted image: src=${src}, alt=${alt || 'No alt text'}`);
+          } else {
+            logMessage(`Skipped image due to alt: src=${src}, alt=${alt}`);
+          }
+        } else {
+          logMessage(`Skipped image: src=${src || 'No src'}, alt=${alt || 'No alt text'}`);
+        }
+      }
+
+      if (imagesData.length === lastCount && !moreButton) {
+        logMessage('No more images to load');
+        break;
+      }
+      lastCount = imagesData.length;
+      scrollAttempts++;
+    } catch (error: any) {
+      logMessage(`Error during image scraping: ${error.message}`);
       break;
     }
-    lastCount = imagesData.length;
-    scrollAttempts++;
   }
 
   logMessage(`Collected ${imagesData.length} image metadata entries for "${keyword}"`);
@@ -199,8 +206,8 @@ async function processImage(inputPath: string, outputPath: string): Promise<bool
 }
 
 // Main function
-export async function main(userId: number | null, keyword: string = KEYWORDS[0]): Promise<void> {
-  logMessage(`Starting image collection for user ${userId || 'anonymous'}, keyword: "${keyword}"`);
+export async function main(userId: number | null, keywords: string[] = ['dog images']): Promise<void> {
+  logMessage(`Starting image collection for user ${userId || 'anonymous'}, keywords: "${keywords.join(', ')}"`);
   initDatabase(async (err, db) => {
     if (err) {
       logMessage(`Failed to initialize database: ${err.message}`);
@@ -208,47 +215,58 @@ export async function main(userId: number | null, keyword: string = KEYWORDS[0])
     }
 
     try {
-      // Insert search record
-      db.run(
-        'INSERT INTO searches (user_id, keyword, image_count) VALUES (?, ?, ?)',
-        [userId, keyword, 0],
-        async function (err) {
+      // Insert search record and get searchId
+      const searchId = await new Promise<number>((resolve, reject) => {
+        db.run(
+          'INSERT INTO searches (user_id, keyword, image_count) VALUES (?, ?, ?)',
+          [userId, keywords.join(', '), 0],
+          function (err) {
+            if (err) {
+              logMessage(`Insert search error: ${err.message}`);
+              reject(err);
+            } else {
+              logMessage(`Created search record with ID: ${this.lastID}`);
+              resolve(this.lastID);
+            }
+          }
+        );
+      });
+
+      let imagesData: ImageData[] = [];
+      // Try each keyword
+      for (const kw of keywords) {
+        if (imagesData.length >= MAX_IMAGES) break;
+        const browser = await chromium.launch({ headless: true });
+        try {
+          const page = await browser.newPage();
+          const newImages = await searchImages(page, kw, MAX_IMAGES - imagesData.length);
+          imagesData = imagesData.concat(newImages);
+          logMessage(`Total images after keyword "${kw}": ${imagesData.length}`);
+        } catch (error: any) {
+          logMessage(`Error processing keyword "${kw}": ${error.message}`);
+        } finally {
+          await browser.close();
+        }
+      }
+
+      if (imagesData.length < MIN_IMAGES) {
+        logMessage(`Collected ${imagesData.length} images, less than required ${MIN_IMAGES}`);
+      }
+
+      let processedCount = 0;
+      await new Promise<void>((resolve, reject) => {
+        db.run('BEGIN TRANSACTION', async (err) => {
           if (err) {
-            logMessage(`Insert search error: ${err.message}`);
-            db.close();
+            logMessage(`Transaction start error: ${err.message}`);
+            reject(err);
             return;
           }
-          const searchId = this.lastID;
-          logMessage(`Created search record with ID: ${searchId}`);
 
-          let imagesData: ImageData[] = [];
-          // Try each keyword until enough images are collected
-          for (const kw of KEYWORDS) {
-            if (imagesData.length >= MAX_IMAGES) break;
-            const browser = await chromium.launch({ headless: true });
-            const page = await browser.newPage();
-            const newImages = await searchImages(page, kw, MAX_IMAGES - imagesData.length);
-            imagesData = imagesData.concat(newImages);
-            await browser.close();
-            logMessage(`Total images after keyword "${kw}": ${imagesData.length}`);
-          }
-
-          if (imagesData.length < MIN_IMAGES) {
-            logMessage(`Collected ${imagesData.length} images, less than required ${MIN_IMAGES}`);
-          }
-
-          let processedCount = 0;
-          db.run('BEGIN TRANSACTION', async (err) => {
-            if (err) {
-              logMessage(`Transaction start error: ${err.message}`);
-              db.close();
-              return;
-            }
-
-            const downloadPromises = imagesData.slice(0, MAX_IMAGES).map(async (image, index) => {
-              const filename = `dog_${searchId}_${index + 1}.jpg`;
-              const filePath = join(OUTPUT_DIR, filename);
-              const tempFilename = join(OUTPUT_DIR, `temp_${searchId}_${index + 1}.jpg`);
+          const downloadPromises = imagesData.slice(0, MAX_IMAGES).map(async (image, index) => {
+            const filename = `dog_${searchId}_${index + 1}.jpg`;
+            const filePath = join(OUTPUT_DIR, filename);
+            const tempFilename = join(OUTPUT_DIR, `temp_${searchId}_${index + 1}.jpg`);
+            try {
               if (await downloadImage(image.src, tempFilename)) {
                 if (await processImage(tempFilename, filePath)) {
                   return new Promise((resolve) => {
@@ -263,50 +281,74 @@ export async function main(userId: number | null, keyword: string = KEYWORDS[0])
                           processedCount++;
                           resolve(image);
                         }
-                        if (existsSync(tempFilename)) unlinkSync(tempFilename);
                       }
                     );
                   });
                 }
-                if (existsSync(tempFilename)) unlinkSync(tempFilename);
               }
               return null;
-            });
+            } finally {
+              if (existsSync(tempFilename)) unlinkSync(tempFilename);
+            }
+          });
 
+          try {
             await Promise.all(downloadPromises);
-            db.run('UPDATE searches SET image_count = ? WHERE id = ?', [processedCount, searchId], (err) => {
-              if (err) logMessage(`Update search image_count error: ${err.message}`);
+            await new Promise<void>((resolve, reject) => {
+              db.run('UPDATE searches SET image_count = ? WHERE id = ?', [processedCount, searchId], (err) => {
+                if (err) {
+                  logMessage(`Update search image_count error: ${err.message}`);
+                  reject(err);
+                } else {
+                  resolve();
+                }
+              });
             });
 
-            db.run('COMMIT', (err) => {
-              if (err) {
-                logMessage(`Transaction commit error: ${err.message}`);
-                db.run('ROLLBACK', () => db.close());
-                return;
-              }
+            await new Promise<void>((resolve, reject) => {
+              db.run('COMMIT', (err) => {
+                if (err) {
+                  logMessage(`Transaction commit error: ${err.message}`);
+                  db.run('ROLLBACK', () => reject(err));
+                  return;
+                }
+                resolve();
+              });
+            });
+
+            await new Promise<void>((resolve, reject) => {
               db.get('SELECT COUNT(*) as count FROM images WHERE search_id = ?', [searchId], (err, result: { count: number }) => {
                 if (err) {
                   logMessage(`Count query error: ${err.message}`);
-                  db.close();
-                  return;
+                  reject(err);
+                } else {
+                  logMessage(`Processed ${processedCount} images for search ${searchId}. Total in database: ${result.count}`);
+                  resolve();
                 }
-                logMessage(`Processed ${processedCount} images for search ${searchId}. Total in database: ${result.count}`);
-                db.close();
               });
             });
-          });
-        }
-      );
+            resolve();
+          } catch (error: any) {
+            logMessage(`Transaction error: ${error.message}`);
+            db.run('ROLLBACK', () => reject(error));
+          }
+        });
+      });
     } catch (err: any) {
       logMessage(`Main execution failed: ${err.message}`);
-      db.run('ROLLBACK', () => db.close());
+      db.run('ROLLBACK', () => {});
+    } finally {
+      db.close((err) => {
+        if (err) logMessage(`Database close error: ${err.message}`);
+        else logMessage('Database connection closed');
+      });
     }
   });
 }
 
 // Run standalone
 if (require.main === module) {
-  main(null).catch((err: any) => {
+  main(null, ['dog images']).catch((err: any) => {
     logMessage(`Main execution failed: ${err.message}`);
   });
 }

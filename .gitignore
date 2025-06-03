@@ -24,4 +24,4 @@ dump.sql
 *.xz
 google_images_screenshot.png
 image_data.db
-log.txt
+google_images_screenshot*

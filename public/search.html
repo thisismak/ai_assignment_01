@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Search Results</title>
+  <title>Search Dog Breeds</title>
   <style>
     body {
       font-family: Arial, sans-serif;
@@ -22,6 +22,32 @@
       max-width: 1200px;
       text-align: center;
       margin-top: 20px;
+    }
+    #search-form {
+      margin-bottom: 20px;
+    }
+    #search-form input[type="text"] {
+      padding: 8px;
+      width: 60%;
+      max-width: 400px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      margin-right: 10px;
+    }
+    #search-form button {
+      padding: 8px 16px;
+      background-color: #007bff;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    #search-form button:hover {
+      background-color: #0056b3;
+    }
+    #search-form button:disabled {
+      background-color: #cccccc;
+      cursor: not-allowed;
     }
     #image-gallery {
       display: grid;
@@ -57,11 +83,14 @@
 </head>
 <body>
   <div class="results-container">
-    <h2>Search Results</h2>
+    <h2>Search Dog Breeds</h2>
+    <form id="search-form">
+      <input type="text" name="keywords" placeholder="Enter dog breeds (e.g., Labrador, Golden Retriever)" />
+      <button type="submit" id="search-button">Search</button>
+    </form>
     <div id="image-gallery"></div>
     <p>
       <a href="/logs">Download Log</a> |
-      <a href="/search">New Search</a> |
       <a href="/logout">Logout</a>
     </p>
     <p id="error" class="error"></p>
@@ -93,7 +122,7 @@
         }
 
         if (images.length === 0) {
-          errorEl.textContent = 'No images found for your searches.';
+          errorEl.textContent = 'No images found for your searches. Try a new search.';
           return;
         }
 
@@ -110,6 +139,51 @@
         console.error('Fetch images error:', err);
       }
     }
+
+    document.getElementById('search-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const token = sessionStorage.getItem('token');
+      const errorEl = document.getElementById('error');
+      const searchButton = document.getElementById('search-button');
+      errorEl.textContent = '';
+      searchButton.disabled = true;
+      searchButton.textContent = 'Searching...';
+
+      try {
+        const formData = new FormData(e.target);
+        const keywordsInput = formData.get('keywords') || 'dog images';
+        const keywords = keywordsInput.split(/[\s,]+/).filter(kw => kw.trim()).map(kw => kw.trim());
+        if (keywords.length === 0) {
+          throw new Error('Please enter at least one keyword');
+        }
+        const response = await fetch('/search', {
+          method: 'POST',
+          headers: {
+            'Authorization': token,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ keywords }),
+        });
+
+        if (response.redirected) {
+          window.location.href = response.url;
+          return;
+        }
+
+        if (!response.ok) {
+          const data = await response.json();
+          errorEl.textContent = data.error || 'Search failed';
+        } else {
+          await loadImages();
+        }
+      } catch (err) {
+        errorEl.textContent = err.message || 'Server error during search';
+        console.error('Search error:', err);
+      } finally {
+        searchButton.disabled = false;
+        searchButton.textContent = 'Search';
+      }
+    });
 
     window.onload = loadImages;
   </script>

@@ -52,15 +52,16 @@ interface Search {
   id: number;
   user_id: number;
   keyword: string;
-  image_count: number | null;
+  image_count: number;
   search_time: string;
 }
 
 // Initialize SQLite database
 const DB_PATH = 'db.sqlite3';
 const db = new sqlite3.Database(DB_PATH, (err) => {
-  if (err) console.error('Database connection error:', err.message);
-  else {
+  if (err) {
+    console.error('Database connection error:', err.message);
+  } else {
     console.log('Connected to SQLite database');
     db.serialize(() => {
       // Create user table
@@ -92,7 +93,7 @@ const db = new sqlite3.Database(DB_PATH, (err) => {
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           user_id INTEGER NOT NULL,
           keyword TEXT NOT NULL,
-          image_count INTEGER,
+          image_count INTEGER NOT NULL DEFAULT 0,
           search_time TEXT DEFAULT CURRENT_TIMESTAMP,
           FOREIGN KEY (user_id) REFERENCES user(id)
         )
@@ -290,9 +291,13 @@ server.get('/search', authenticate, (req: Request, res: Response) => {
 });
 
 server.post('/search', authenticate, async (req: Request, res: Response): Promise<void> => {
-  const keyword = req.body.keyword || 'specific dog breeds photos';
+  const { keywords } = req.body;
+  if (!keywords || !Array.isArray(keywords) || keywords.length === 0) {
+    res.status(400).json({ error: 'At least one keyword is required' });
+    return;
+  }
   try {
-    await main(req.user_id!, keyword);
+    await main(req.user_id!, keywords);
     res.redirect('/results');
   } catch (err: any) {
     console.error('Search error:', err.message);
@@ -313,7 +318,7 @@ server.get('/api/images', authenticate, (req: Request, res: Response) => {
         console.error('Database error in /api/images:', err.message);
         return res.status(500).json({ error: 'server error' });
       }
-      console.log('Images fetched:', rows.map((r: any) => ({ id: r.id, src: r.src, filename: r.filename }))); // Debug
+      console.log('Images fetched:', rows.map((r: any) => ({ id: r.id, src: r.src, filename: r.filename })));
       res.json(rows);
     }
   );
