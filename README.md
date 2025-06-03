@@ -7,8 +7,25 @@
 - 將圖像元數據儲存到 SQLite 數據庫。
 - 完全自動化，無需人工干預。
 
-## 設置與運行
-1. 安裝依賴：
-   ```bash
-   npm install
-   npx playwright install
+## Installation guide
+1. Installs all dependencies listed in package.json (e.g., express, sqlite3, bcrypt, ts-node-dev)
+npm install
+
+2. Applies the schema from erd.txt to create db.sqlite3 with user and session tables
+npx auto-migrate db.sqlite3 < erd.txt
+PS (bash mode to run)
+
+
+3. Applies any pending migrations (via knex) and generates proxy.ts for database access
+npm run db:update
+
+4. Runs server.ts
+npx ts-node server.ts
+
+## Good Tools
+### Project export
+Export data : Dir2file: Select Files to Export
+PS: installed "Export Directory to File"
+
+### erd format
+https://erd.surge.sh/

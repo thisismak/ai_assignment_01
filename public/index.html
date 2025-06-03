@@ -1,0 +1,41 @@
+<!-- public/index.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Welcome</title>
+</head>
+<body>
+  <h2>Welcome to Dog Breed Image Search</h2>
+  <p>
+    <a href="/login">Login</a> | 
+    <a href="/register">Register</a> | 
+    <a href="/search">Search Dog Breeds</a>
+  </p>
+  <p id="error" style="color: red;"></p>
+  <script>
+    async function checkToken() {
+      const token = sessionStorage.getItem('token');
+      const errorEl = document.getElementById('error');
+      if (token) {
+        try {
+          const response = await fetch('/api/searches', {
+            headers: { 'Authorization': token },
+          });
+          if (response.ok) {
+            window.location.href = '/search';
+          } else {
+            errorEl.textContent = 'Invalid token. Please log in again.';
+            sessionStorage.removeItem('token');
+            setTimeout(() => { window.location.href = '/login'; }, 2000);
+          }
+        } catch (err) {
+          errorEl.textContent = 'Server error';
+          console.error('Token check error:', err);
+        }
+      }
+    }
+    window.onload = checkToken;
+  </script>
+</body>
+</html>

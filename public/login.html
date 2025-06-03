@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Login</title>
+</head>
+<body>
+  <h2>Login</h2>
+  <form id="login-form">
+    <input type="text" name="username" placeholder="Username" required />
+    <input type="password" name="password" placeholder="Password" required />
+    <button type="submit">Login</button>
+  </form>
+  <p id="error" style="color: red;"></p>
+  <p><a href="/register">Register</a></p>
+  <script>
+    document.getElementById('login-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const errorEl = document.getElementById('error');
+      errorEl.textContent = '';
+      const formData = new FormData(e.target);
+      try {
+        const response = await fetch('/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            username: formData.get('username'),
+            password: formData.get('password'),
+          }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          errorEl.textContent = data.error || 'Login failed';
+          return;
+        }
+        sessionStorage.setItem('token', data.token);
+        window.location.href = '/search';
+      } catch (err) {
+        errorEl.textContent = 'Server error';
+        console.error('Login error:', err);
+      }
+    });
+  </script>
+</body>
+</html>

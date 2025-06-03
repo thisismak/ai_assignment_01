@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Register</title>
+</head>
+<body>
+  <h2>Register</h2>
+  <form id="register-form">
+    <input type="text" name="username" placeholder="Username" required />
+    <input type="password" name="password" placeholder="Password" required />
+    <input type="email" name="email" placeholder="Email" />
+    <button type="submit">Register</button>
+  </form>
+  <p id="error" style="color: red;"></p>
+  <p><a href="/login">Login</a></p>
+  <script>
+    document.getElementById('register-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const errorEl = document.getElementById('error');
+      errorEl.textContent = '';
+      const formData = new FormData(e.target);
+      try {
+        const response = await fetch('/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            username: formData.get('username'),
+            password: formData.get('password'),
+            email: formData.get('email'),
+          }),
+        });
+        if (response.redirected) {
+          window.location.href = response.url; // Follow redirect to /login
+          return;
+        }
+        const data = await response.json();
+        if (!response.ok) {
+          errorEl.textContent = data.error || 'Registration failed';
+          return;
+        }
+      } catch (err) {
+        errorEl.textContent = 'Server error';
+        console.error('Register error:', err);
+      }
+    });
+  </script>
+</body>
+</html>
