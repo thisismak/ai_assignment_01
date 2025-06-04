@@ -1,0 +1,5 @@
+dog_images
+*.db
+*.log
+.venv
+log_summary.txt
