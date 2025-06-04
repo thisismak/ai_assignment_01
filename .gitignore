@@ -3,3 +3,4 @@ dog_images
 *.log
 .venv
 log_summary.txt
+*.csv

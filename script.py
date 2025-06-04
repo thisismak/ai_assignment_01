@@ -6,7 +6,10 @@ from PIL import Image
 import io
 import logging
 import random
+import re
+import csv
 from urllib.parse import urlparse
+from uuid import uuid4
 
 # Configure logging to track progress and errors
 logging.basicConfig(
@@ -16,15 +19,15 @@ logging.basicConfig(
 )
 
 # Configuration constants
-OUTPUT_DIR = "dog_images"  # Directory for downloaded images
-DB_NAME = "dog_images.db"  # SQLite database name
-TARGET_IMAGE_COUNT = 3000  # Minimum target (3000–5000)
-MAX_IMAGE_SIZE = 50 * 1024  # 50KB max size
-QUALITY_RANGE = (50, 80)  # JPEG quality range
-IMAGE_SIZE = (500, 500)  # Max image dimensions
-MAX_IMAGES_PER_KEYWORD = 500  # Limit per keyword to avoid timeouts
+OUTPUT_DIR = "dog_images"
+DB_NAME = "dog_images.db"
+TARGET_IMAGE_COUNT = 3000
+MAX_IMAGE_SIZE = 100 * 1024  # Increased to 100KB to reduce compression failures
+QUALITY_RANGE = (40, 90)      # Broader quality range
+IMAGE_SIZE = (500, 500)
+MAX_IMAGES_PER_KEYWORD = 500
 
-# Expanded list of dog breeds for diverse image collection
+# Expanded list of dog breeds
 DOG_BREEDS = [
     "Labrador Retriever", "German Shepherd", "Golden Retriever",
     "Bulldog", "Poodle", "Beagle", "Rottweiler", "Siberian Husky",
@@ -34,7 +37,7 @@ DOG_BREEDS = [
     "Newfoundland", "Saint Bernard", "Weimaraner"
 ]
 
-# Create output directory if it doesn't exist
+# Create output directory
 if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR)
 
@@ -54,7 +57,7 @@ def init_database():
     return conn, cursor
 
 def get_keyword_variants(breed):
-    """Generate keyword variants for a dog breed to improve search relevance."""
+    """Generate keyword variants for a dog breed."""
     return [
         breed,
         f"{breed} dog",
@@ -63,9 +66,20 @@ def get_keyword_variants(breed):
         f"{breed} portrait"
     ]
 
+def filter_alt_text(alt):
+    """Filter alt_text to ensure it's non-empty and descriptive."""
+    if not alt or not alt.strip():
+        logging.warning(f"Filtered out image with empty alt text")
+        return False
+    if len(alt.strip()) < 3:
+        logging.warning(f"Filtered out image with short alt text: {alt}")
+        return False
+    return True  # Relaxed filtering, removed English letter requirement
+
 def collect_image_urls_google(page, keyword, max_images):
     """Collect image URLs and alt texts from Google Images."""
     images = []
+    empty_alt_count = 0
     try:
         logging.info(f"Searching Google for keyword: {keyword}")
         page.goto(f"https://www.google.com/search?tbm=isch&q={keyword}", timeout=60000)
@@ -76,22 +90,26 @@ def collect_image_urls_google(page, keyword, max_images):
             for img in image_elements:
                 src = img.get_attribute("src") or img.get_attribute("data-src")
                 alt = img.get_attribute("alt") or ""
-                if src and src.startswith("http") and (src, alt) not in images:
-                    images.append((src, alt))
+                if src and src.startswith("http"):
+                    if filter_alt_text(alt) and (src, alt) not in images:
+                        images.append((src, alt))
+                    else:
+                        empty_alt_count += 1
             page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            page.wait_for_timeout(random.uniform(1000, 3000))  # Random delay to avoid blocking
+            page.wait_for_timeout(random.uniform(1000, 3000))
             new_height = page.evaluate("document.body.scrollHeight")
             if new_height == last_height:
                 break
             last_height = new_height
-        logging.info(f"Collected {len(images)} images from Google for {keyword}")
+        logging.info(f"Collected {len(images)} images from Google for {keyword}, skipped {empty_alt_count} empty/invalid alt texts")
     except Exception as e:
         logging.error(f"Error collecting images from Google for {keyword}: {str(e)}")
-    return images
+    return images, empty_alt_count
 
 def collect_image_urls_bing(page, keyword, max_images):
     """Collect image URLs and alt texts from Bing Images."""
     images = []
+    empty_alt_count = 0
     try:
         logging.info(f"Searching Bing for keyword: {keyword}")
         page.goto(f"https://www.bing.com/images/search?q={keyword}", timeout=60000)
@@ -102,55 +120,64 @@ def collect_image_urls_bing(page, keyword, max_images):
             for img in image_elements:
                 src = img.get_attribute("src") or img.get_attribute("data-src")
                 alt = img.get_attribute("alt") or ""
-                if src and src.startswith("http") and (src, alt) not in images:
-                    images.append((src, alt))
+                if src and src.startswith("http"):
+                    if filter_alt_text(alt) and (src, alt) not in images:
+                        images.append((src, alt))
+                    else:
+                        empty_alt_count += 1
             page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            page.wait_for_timeout(random.uniform(1000, 3000))  # Random delay
+            page.wait_for_timeout(random.uniform(1000, 3000))
             new_height = page.evaluate("document.body.scrollHeight")
             if new_height == last_height:
                 break
             last_height = new_height
-        logging.info(f"Collected {len(images)} images from Bing for {keyword}")
+        logging.info(f"Collected {len(images)} images from Bing for {keyword}, skipped {empty_alt_count} empty/invalid alt texts")
     except Exception as e:
         logging.error(f"Error collecting images from Bing for {keyword}: {str(e)}")
-    return images
+    return images, empty_alt_count
 
 def collect_image_urls(playwright, keyword, max_images):
     """Collect images from Google and Bing, deduplicating results."""
     browser = playwright.chromium.launch(headless=True)
     page = browser.new_page()
     images = []
+    total_empty_alt_count = 0
     try:
-        images.extend(collect_image_urls_google(page, keyword, max_images))
-        images.extend(collect_image_urls_bing(page, keyword, max_images))
-        images = list(dict.fromkeys(images))  # Deduplicate while preserving order
-        logging.info(f"Total unique images collected for {keyword}: {len(images)}")
+        google_images, google_empty_alt = collect_image_urls_google(page, keyword, int(max_images * 2))  # Doubled to compensate for losses
+        images.extend(google_images)
+        total_empty_alt_count += google_empty_alt
+        bing_images, bing_empty_alt = collect_image_urls_bing(page, keyword, int(max_images * 2))
+        images.extend(bing_images)
+        total_empty_alt_count += bing_empty_alt
+        images = list(dict.fromkeys(images))  # Deduplicate
+        logging.info(f"Total unique images collected for {keyword}: {len(images)}, total skipped alt texts: {total_empty_alt_count}")
     except Exception as e:
         logging.error(f"Error in collect_image_urls for {keyword}: {str(e)}")
     finally:
         browser.close()
-    return images[:max_images]
+    return images[:max_images], total_empty_alt_count
 
 def download_image(url, filename):
-    """Download an image from a URL and save it locally."""
-    try:
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            with open(filename, "wb") as f:
-                f.write(response.content)
-            return True
-        else:
-            logging.warning(f"Failed to download {url}: Status code {response.status_code}")
-            return False
-    except Exception as e:
-        logging.error(f"Error downloading {url}: {str(e)}")
-        return False
+    """Download an image from a URL and save it locally with retries."""
+    for attempt in range(3):  # Retry up to 3 times
+        try:
+            response = requests.get(url, timeout=15)
+            if response.status_code == 200:
+                with open(filename, "wb") as f:
+                    f.write(response.content)
+                return True
+            else:
+                logging.warning(f"Attempt {attempt+1}: Failed to download {url}: Status code {response.status_code}")
+        except Exception as e:
+            logging.error(f"Attempt {attempt+1}: Error downloading {url}: {str(e)}")
+    logging.error(f"Failed to download {url} after 3 attempts")
+    return False
 
 def process_image(input_path, output_path):
-    """Resize, center-crop, and encode image as JPEG under 50KB."""
+    """Resize, center-crop, and encode image as JPEG under MAX_IMAGE_SIZE."""
     try:
         with Image.open(input_path) as img:
-            img = img.convert("RGB")  # Ensure JPEG compatibility
+            img = img.convert("RGB")
             img.thumbnail(IMAGE_SIZE, Image.Resampling.LANCZOS)
             width, height = img.size
             left = (width - min(IMAGE_SIZE[0], width)) / 2
@@ -168,16 +195,31 @@ def process_image(input_path, output_path):
                         f.write(buffer.getvalue())
                     return True
                 quality -= 5
-            logging.warning(f"Could not compress {input_path} to under 50KB")
+            logging.warning(f"Could not compress {input_path} to under {MAX_IMAGE_SIZE/1024}KB")
             return False
     except Exception as e:
         logging.error(f"Error processing {input_path}: {str(e)}")
         return False
 
+def export_failure_report(failure_log, filename="image_failure_report.csv"):
+    """Export failure log to CSV for analysis."""
+    headers = ["keyword", "url", "alt_text", "failure_stage", "failure_reason"]
+    with open(filename, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(headers)
+        writer.writerows(failure_log)
+    logging.info(f"Exported failure report to {filename}")
+
 def main():
     """Main function to collect, download, and process dog images."""
     conn, cursor = init_database()
     total_images = 0
+    filtered_out_alt = 0
+    download_failed = 0
+    process_failed = 0
+    duplicate_urls = 0
+    failure_log = []  # To store detailed failure information
+
     try:
         with sync_playwright() as playwright:
             for breed in DOG_BREEDS:
@@ -187,28 +229,60 @@ def main():
                     if total_images >= TARGET_IMAGE_COUNT:
                         break
                     logging.info(f"Processing keyword: {keyword}")
-                    images = collect_image_urls(playwright, keyword, MAX_IMAGES_PER_KEYWORD)
+                    images, empty_alt_count = collect_image_urls(playwright, keyword, MAX_IMAGES_PER_KEYWORD)
+                    filtered_out_alt += empty_alt_count
                     for i, (url, alt) in enumerate(images):
                         if total_images >= TARGET_IMAGE_COUNT:
                             break
                         filename = os.path.join(OUTPUT_DIR, f"{breed.replace(' ', '_')}_{total_images}.jpg")
                         temp_filename = os.path.join(OUTPUT_DIR, f"temp_{total_images}.jpg")
-                        if download_image(url, temp_filename):
-                            if process_image(temp_filename, filename):
-                                cursor.execute(
-                                    "INSERT OR IGNORE INTO images (url, alt_text, filename) VALUES (?, ?, ?)",
-                                    (url, alt, filename)
-                                )
-                                total_images += 1
-                                logging.info(f"Successfully processed image: {filename}")
+                        if not download_image(url, temp_filename):
+                            download_failed += 1
+                            failure_log.append([keyword, url, alt, "download", "Failed after 3 attempts"])
+                            continue
+                        if not process_image(temp_filename, filename):
+                            process_failed += 1
+                            failure_log.append([keyword, url, alt, "processing", "Compression or processing error"])
                             os.remove(temp_filename) if os.path.exists(temp_filename) else None
+                            continue
+                        cursor.execute(
+                            "INSERT OR IGNORE INTO images (url, alt_text, filename) VALUES (?, ?, ?)",
+                            (url, alt, filename)
+                        )
+                        if cursor.rowcount == 0:
+                            duplicate_urls += 1
+                            failure_log.append([keyword, url, alt, "database", "Duplicate URL"])
+                        else:
+                            total_images += 1
+                            logging.info(f"Successfully processed image: {filename}")
+                        os.remove(temp_filename) if os.path.exists(temp_filename) else None
                     conn.commit()
                     logging.info(f"Completed keyword {keyword}, total images: {total_images}")
     except Exception as e:
         logging.error(f"Error in main loop: {str(e)}")
+        failure_log.append(["N/A", "N/A", "N/A", "main_loop", str(e)])
     finally:
-        logging.info(f"Total images collected and processed: {total_images}")
-        print(f"Total images collected and processed: {total_images}")
+        # Verify database count
+        cursor.execute("SELECT COUNT(*) FROM images")
+        db_count = cursor.fetchone()[0]
+        logging.info(f"Database verification: {db_count} images stored")
+        print(f"數據庫驗證：存儲了 {db_count} 張圖片")
+        
+        # Log summary
+        logging.info(f"總共收集並處理的圖片數：{total_images}")
+        logging.info(f"因無效alt文本過濾掉的圖片：{filtered_out_alt}")
+        logging.info(f"下載失敗的圖片：{download_failed}")
+        logging.info(f"處理失敗的圖片：{process_failed}")
+        logging.info(f"重複URL跳過的圖片：{duplicate_urls}")
+        print(f"總共收集並處理的圖片數：{total_images}")
+        print(f"因無效alt文本過濾掉的圖片：{filtered_out_alt}")
+        print(f"下載失敗的圖片：{download_failed}")
+        print(f"處理失敗的圖片：{process_failed}")
+        print(f"重複URL跳過的圖片：{duplicate_urls}")
+        
+        # Export failure report
+        export_failure_report(failure_log)
+        
         conn.commit()
         conn.close()
 
