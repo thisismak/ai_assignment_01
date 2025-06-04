@@ -22,6 +22,9 @@ npm run db:update
 4. Runs server.ts
 npx ts-node server.ts
 
+## Keyword suggestion
+chihuahua, 吉娃娃, pomeranian, 博美犬, yorkshire terrier, 約克夏, maltese, 馬爾濟斯, dachshund, 臘腸犬, miniature poodle, 迷你貴賓犬, french bulldog, 法國鬥牛犬, bichon frise, 比熊犬, shih tzu, 西施犬, miniature schnauzer, 迷你雪納瑞
+
 ## Good Tools
 ### Project export
 Export data : Dir2file: Select Files to Export
