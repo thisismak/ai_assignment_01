@@ -21,20 +21,18 @@ logging.basicConfig(
 # Configuration constants
 OUTPUT_DIR = "dog_images"
 DB_NAME = "dog_images.db"
-TARGET_IMAGE_COUNT = 3000
-MAX_IMAGE_SIZE = 100 * 1024  # Increased to 100KB to reduce compression failures
+TARGET_IMAGE_COUNT_MIN = 3000
+TARGET_IMAGE_COUNT_MAX = 5000
+IMAGES_PER_BREED = 400  # Limit per breed
+MAX_IMAGE_SIZE = 100 * 1024  # 100KB to reduce compression failures
 QUALITY_RANGE = (40, 90)      # Broader quality range
 IMAGE_SIZE = (500, 500)
-MAX_IMAGES_PER_KEYWORD = 500
+MAX_IMAGES_PER_KEYWORD = 1000  # Increased for efficiency
 
-# Expanded list of dog breeds
+# List of dog breeds
 DOG_BREEDS = [
-    "Labrador Retriever", "German Shepherd", "Golden Retriever",
-    "Bulldog", "Poodle", "Beagle", "Rottweiler", "Siberian Husky",
-    "Dachshund", "Boxer", "Shih Tzu", "Chihuahua", "Yorkshire Terrier",
-    "Doberman Pinscher", "Great Dane", "Border Collie", "Australian Shepherd",
-    "Cocker Spaniel", "Pug", "French Bulldog", "Maltese", "Bernese Mountain Dog",
-    "Newfoundland", "Saint Bernard", "Weimaraner"
+    "Maltese", "Yorkshire Terrier", "Pomeranian", "Chihuahua", "Miniature Schnauzer",
+    "Shih Tzu", "Poodle", "Dachshund", "Shiba Inu", "Labrador Retriever"
 ]
 
 # Create output directory
@@ -50,7 +48,8 @@ def init_database():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             url TEXT UNIQUE,
             alt_text TEXT,
-            filename TEXT
+            filename TEXT,
+            breed TEXT
         )
     ''')
     conn.commit()
@@ -63,7 +62,9 @@ def get_keyword_variants(breed):
         f"{breed} dog",
         f"{breed} puppy",
         f"cute {breed}",
-        f"{breed} portrait"
+        f"{breed} portrait",
+        f"{breed} pet",
+        f"{breed} breed"
     ]
 
 def filter_alt_text(alt):
@@ -74,7 +75,7 @@ def filter_alt_text(alt):
     if len(alt.strip()) < 3:
         logging.warning(f"Filtered out image with short alt text: {alt}")
         return False
-    return True  # Relaxed filtering, removed English letter requirement
+    return True
 
 def collect_image_urls_google(page, keyword, max_images):
     """Collect image URLs and alt texts from Google Images."""
@@ -96,7 +97,7 @@ def collect_image_urls_google(page, keyword, max_images):
                     else:
                         empty_alt_count += 1
             page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            page.wait_for_timeout(random.uniform(1000, 3000))
+            page.wait_for_timeout(random.uniform(500, 1500))  # Reduced for efficiency
             new_height = page.evaluate("document.body.scrollHeight")
             if new_height == last_height:
                 break
@@ -126,7 +127,7 @@ def collect_image_urls_bing(page, keyword, max_images):
                     else:
                         empty_alt_count += 1
             page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            page.wait_for_timeout(random.uniform(1000, 3000))
+            page.wait_for_timeout(random.uniform(500, 1500))  # Reduced for efficiency
             new_height = page.evaluate("document.body.scrollHeight")
             if new_height == last_height:
                 break
@@ -143,7 +144,7 @@ def collect_image_urls(playwright, keyword, max_images):
     images = []
     total_empty_alt_count = 0
     try:
-        google_images, google_empty_alt = collect_image_urls_google(page, keyword, int(max_images * 2))  # Doubled to compensate for losses
+        google_images, google_empty_alt = collect_image_urls_google(page, keyword, int(max_images * 2))
         images.extend(google_images)
         total_empty_alt_count += google_empty_alt
         bing_images, bing_empty_alt = collect_image_urls_bing(page, keyword, int(max_images * 2))
@@ -159,7 +160,7 @@ def collect_image_urls(playwright, keyword, max_images):
 
 def download_image(url, filename):
     """Download an image from a URL and save it locally with retries."""
-    for attempt in range(3):  # Retry up to 3 times
+    for attempt in range(3):
         try:
             response = requests.get(url, timeout=15)
             if response.status_code == 200:
@@ -210,6 +211,16 @@ def export_failure_report(failure_log, filename="image_failure_report.csv"):
         writer.writerows(failure_log)
     logging.info(f"Exported failure report to {filename}")
 
+def export_breed_distribution(breed_counts, filename="breed_distribution.csv"):
+    """Export breed distribution to CSV for analysis."""
+    headers = ["breed", "image_count"]
+    with open(filename, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(headers)
+        for breed, count in breed_counts.items():
+            writer.writerow([breed, count])
+    logging.info(f"Exported breed distribution to {filename}")
+
 def main():
     """Main function to collect, download, and process dog images."""
     conn, cursor = init_database()
@@ -218,21 +229,27 @@ def main():
     download_failed = 0
     process_failed = 0
     duplicate_urls = 0
-    failure_log = []  # To store detailed failure information
+    failure_log = []
+    breed_counts = {breed: 0 for breed in DOG_BREEDS}  # Track images per breed
 
     try:
+        # Randomize breed order to avoid bias
+        randomized_breeds = DOG_BREEDS.copy()
+        random.shuffle(randomized_breeds)
+        
         with sync_playwright() as playwright:
-            for breed in DOG_BREEDS:
-                if total_images >= TARGET_IMAGE_COUNT:
+            # First pass: collect up to IMAGES_PER_BREED per breed
+            for breed in randomized_breeds:
+                if total_images >= TARGET_IMAGE_COUNT_MAX:
                     break
                 for keyword in get_keyword_variants(breed):
-                    if total_images >= TARGET_IMAGE_COUNT:
+                    if total_images >= TARGET_IMAGE_COUNT_MAX or breed_counts[breed] >= IMAGES_PER_BREED:
                         break
-                    logging.info(f"Processing keyword: {keyword}")
+                    logging.info(f"Processing keyword: {keyword} for breed: {breed}")
                     images, empty_alt_count = collect_image_urls(playwright, keyword, MAX_IMAGES_PER_KEYWORD)
                     filtered_out_alt += empty_alt_count
                     for i, (url, alt) in enumerate(images):
-                        if total_images >= TARGET_IMAGE_COUNT:
+                        if total_images >= TARGET_IMAGE_COUNT_MAX or breed_counts[breed] >= IMAGES_PER_BREED:
                             break
                         filename = os.path.join(OUTPUT_DIR, f"{breed.replace(' ', '_')}_{total_images}.jpg")
                         temp_filename = os.path.join(OUTPUT_DIR, f"temp_{total_images}.jpg")
@@ -246,18 +263,63 @@ def main():
                             os.remove(temp_filename) if os.path.exists(temp_filename) else None
                             continue
                         cursor.execute(
-                            "INSERT OR IGNORE INTO images (url, alt_text, filename) VALUES (?, ?, ?)",
-                            (url, alt, filename)
+                            "INSERT OR IGNORE INTO images (url, alt_text, filename, breed) VALUES (?, ?, ?, ?)",
+                            (url, alt, filename, breed)
                         )
                         if cursor.rowcount == 0:
                             duplicate_urls += 1
                             failure_log.append([keyword, url, alt, "database", "Duplicate URL"])
                         else:
                             total_images += 1
-                            logging.info(f"Successfully processed image: {filename}")
+                            breed_counts[breed] += 1
+                            logging.info(f"Successfully processed image: {filename} for breed: {breed}")
                         os.remove(temp_filename) if os.path.exists(temp_filename) else None
                     conn.commit()
-                    logging.info(f"Completed keyword {keyword}, total images: {total_images}")
+                    logging.info(f"Completed keyword {keyword}, total images: {total_images}, breed {breed}: {breed_counts[breed]}")
+            
+            # Second pass: supplement if total_images < TARGET_IMAGE_COUNT_MIN
+            if total_images < TARGET_IMAGE_COUNT_MIN:
+                logging.info(f"Shortfall of {TARGET_IMAGE_COUNT_MIN - total_images} images, retrying underfilled breeds")
+                average_images = total_images // len(DOG_BREEDS)
+                underfilled_breeds = [breed for breed, count in breed_counts.items() if count < IMAGES_PER_BREED]
+                random.shuffle(underfilled_breeds)
+                for breed in underfilled_breeds:
+                    if total_images >= TARGET_IMAGE_COUNT_MIN:
+                        break
+                    for keyword in get_keyword_variants(breed):
+                        if total_images >= TARGET_IMAGE_COUNT_MIN or breed_counts[breed] >= IMAGES_PER_BREED:
+                            break
+                        logging.info(f"Supplementing keyword {keyword} for breed {breed}")
+                        images, empty_alt_count = collect_image_urls(playwright, keyword, MAX_IMAGES_PER_KEYWORD)
+                        filtered_out_alt += empty_alt
+                        for i, (url, alt) in enumerate(images):
+                            if total_images >= TARGET_IMAGE_COUNT_MIN or breed_counts[breed] >= IMAGES_PER_BREED:
+                                break
+                            filename = os.path.join(OUTPUT_DIR, f"{breed.replace(' ', '_')}_{total_images}.jpg")
+                            temp_filename = os.path.join(OUTPUT_DIR, f"temp_{total_images}.jpg")
+                            if not download_image(url, temp_filename):
+                                download_failed += 1
+                                failure_log.append([keyword, url, alt, "download", "Failed after 3 attempts"])
+                                continue
+                            if not process_image(temp_filename, filename):
+                                process_failed += 1
+                                failure_log.append([keyword, url, alt, "processing", "Compression or processing error"])
+                                os.remove(temp_filename) if os.path.exists(temp_filename) else None
+                                continue
+                            cursor.execute(
+                                "INSERT OR IGNORE INTO images (url, alt_text, filename, breed) VALUES (?, ?, ?, ?)",
+                                (url, alt, filename, breed)
+                            )
+                            if cursor.rowcount == 0:
+                                duplicate_urls += 1
+                                failure_log.append([keyword, url, alt, "database", "Duplicate URL"])
+                            else:
+                                total_images += 1
+                                breed_counts[breed] += 1
+                                logging.info(f"Successfully processed image: {filename} for breed: {breed}")
+                            os.remove(temp_filename) if os.path.exists(temp_filename) else None
+                        conn.commit()
+                        logging.info(f"Completed supplementing keyword {keyword}, total images: {total_images}, breed {breed}: {breed_counts[breed]}")
     except Exception as e:
         logging.error(f"Error in main loop: {str(e)}")
         failure_log.append(["N/A", "N/A", "N/A", "main_loop", str(e)])
@@ -274,14 +336,17 @@ def main():
         logging.info(f"下載失敗的圖片：{download_failed}")
         logging.info(f"處理失敗的圖片：{process_failed}")
         logging.info(f"重複URL跳過的圖片：{duplicate_urls}")
+        logging.info(f"品種分佈：{breed_counts}")
         print(f"總共收集並處理的圖片數：{total_images}")
         print(f"因無效alt文本過濾掉的圖片：{filtered_out_alt}")
         print(f"下載失敗的圖片：{download_failed}")
         print(f"處理失敗的圖片：{process_failed}")
         print(f"重複URL跳過的圖片：{duplicate_urls}")
+        print(f"品種分佈：{breed_counts}")
         
-        # Export failure report
+        # Export reports
         export_failure_report(failure_log)
+        export_breed_distribution(breed_counts)
         
         conn.commit()
         conn.close()
