@@ -13,7 +13,9 @@ python -m pip install --upgrade pip
 pip install playwright
 playwright install
 4. 在虛擬環境中安裝 TensorFlow、Pillow 和 NumPy
+pip install tensorflow==2.12.0 pillow==9.5.0 requests==2.31.0 playwright==1.44.0 numpy==1.23.5 matplotlib==3.7.1
 pip install tensorflow==2.15.0 pillow numpy
+playwright install chromium
 5. 執行腳本
 python image_processing.py
 

@@ -15,6 +15,7 @@ from tensorflow.keras.layers import Dense, GlobalAveragePooling2D
 from tensorflow.keras.models import Model
 import numpy as np
 import matplotlib.pyplot as plt
+import subprocess
 
 # 配置日誌記錄
 logging.basicConfig(
@@ -25,6 +26,7 @@ logging.basicConfig(
 
 # 配置常數
 OUTPUT_DIR = "dog_images"
+TRAINING_DATA_DIR = "training_data"
 DB_NAME = "dog_images.db"
 TARGET_IMAGE_COUNT_MIN = 1000
 TARGET_IMAGE_COUNT_MAX = 5000
@@ -34,6 +36,7 @@ QUALITY_RANGE = (40, 90)
 IMAGE_SIZE = (500, 500)
 CLASSIFIER_IMAGE_SIZE = (224, 224)
 MAX_IMAGES_PER_KEYWORD = 1000
+TRAINING_IMAGES_PER_CLASS = 100  # 每個類別（真實狗、非真實狗）收集100張圖片
 
 # 狗品種列表
 DOG_BREEDS = [
@@ -41,9 +44,11 @@ DOG_BREEDS = [
     "Shih Tzu", "Poodle", "Dachshund", "Shiba Inu", "Labrador Retriever"
 ]
 
-# 創建輸出目錄
-if not os.path.exists(OUTPUT_DIR):
-    os.makedirs(OUTPUT_DIR)
+# 創建輸出目錄和訓練數據目錄
+for directory in [OUTPUT_DIR, os.path.join(TRAINING_DATA_DIR, "real_dogs"), os.path.join(TRAINING_DATA_DIR, "non_real_dogs")]:
+    if not os.path.exists(directory):
+        os.makedirs(directory)
+        logging.info(f"Created directory: {directory}")
 
 class DatabaseManager:
     """管理 SQLite 數據庫的操作"""
@@ -265,7 +270,11 @@ class ImageCollector:
             if not self.download_image(url, filename):
                 self.failure_log.append([keyword, url, "N/A", "download", "Failed after 3 attempts"])
                 continue
-            logging.info(f"Collected training image: {filename} for keyword: {keyword}")
+            if not self.process_image(filename, filename):
+                self.failure_log.append([keyword, url, "N/A", "processing", "Compression or processing error"])
+                os.remove(filename) if os.path.exists(filename) else None
+                continue
+            logging.info(f"Collected and processed training image: {filename} for keyword: {keyword}")
     
     def collect_and_process(self):
         """收集並處理圖片，存儲到數據庫"""
@@ -340,6 +349,7 @@ class ImageClassifier:
                 verbose=1
             )
             self.plot_training_history(history, "training_history.png")
+            self.model.save("real_dog_classifier.h5")
             logging.info(f"訓練完成：最終訓練準確率 {history.history['accuracy'][-1]:.4f}, "
                         f"驗證準確率 {history.history['val_accuracy'][-1]:.4f}")
     
@@ -540,12 +550,52 @@ class DatasetCleaner:
                 writer.writerow([breed, count])
         logging.info(f"導出品種分佈報告至 {filename}")
 
+def generate_erd():
+    """生成 ERD 文件"""
+    erd_content = """
+    [images]
+    id INTEGER PRIMARY KEY AUTOINCREMENT
+    url TEXT UNIQUE
+    alt_text TEXT
+    filename TEXT
+    breed TEXT
+    """
+    erd_file = "images.erd"
+    erd_output = "images_erd.png"
+    try:
+        with open(erd_file, "w", encoding="utf-8") as f:
+            f.write(erd_content)
+        subprocess.run(["quick-erd", erd_file, "-o", erd_output], check=True)
+        logging.info(f"ERD 文件生成成功: {erd_output}")
+    except subprocess.CalledProcessError as e:
+        logging.error(f"ERD 生成失敗: {str(e)}")
+    except FileNotFoundError:
+        logging.error("quick-erd 未安裝，請運行 'pip install quick-erd'")
+    except Exception as e:
+        logging.error(f"ERD 生成過程中發生錯誤: {str(e)}")
+
 def main():
     """主函數：執行圖片收集、清理和報告生成"""
+    db_manager = None
+    cleaner = None
     try:
+        # 初始化數據庫
         db_manager = DatabaseManager(DB_NAME)
+        
+        # 收集訓練數據
+        logging.info("開始收集訓練數據")
+        real_dog_collector = ImageCollector(os.path.join(TRAINING_DATA_DIR, "real_dogs"), db_manager)
+        real_dog_collector.collect_training_data("real dog photo", max_images=TRAINING_IMAGES_PER_CLASS)
+        non_real_dog_collector = ImageCollector(os.path.join(TRAINING_DATA_DIR, "non_real_dogs"), db_manager)
+        non_real_dog_collector.collect_training_data("cartoon dog", max_images=TRAINING_IMAGES_PER_CLASS // 2)
+        non_real_dog_collector.collect_training_data("dog tattoo", max_images=TRAINING_IMAGES_PER_CLASS // 2)
+        logging.info("訓練數據收集完成")
+        
+        # 初始化分類器並訓練
+        classifier = ImageClassifier(train_data_dir=TRAINING_DATA_DIR)
+        
+        # 收集主數據集
         collector = ImageCollector(OUTPUT_DIR, db_manager)
-        classifier = ImageClassifier(train_data_dir="training_data")
         cleaner = DatasetCleaner(OUTPUT_DIR, db_manager, classifier)
         
         logging.info("開始圖片收集")
@@ -577,11 +627,16 @@ def main():
         cleaner.failure_log.extend(collector.failure_log)
         cleaner.export_failure_report()
         
+        # 生成 ERD
+        generate_erd()
+        
     except Exception as e:
         logging.error(f"主程序錯誤: {str(e)}")
-        cleaner.failure_log.append(["N/A", "N/A", "N/A", "main_loop", str(e)])
+        if cleaner is not None:
+            cleaner.failure_log.append(["N/A", "N/A", "N/A", "main_loop", str(e)])
     finally:
-        db_manager.close()
+        if db_manager is not None:
+            db_manager.close()
 
 if __name__ == "__main__":
     main()

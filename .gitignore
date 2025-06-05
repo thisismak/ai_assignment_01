@@ -4,3 +4,6 @@ dog_images
 .venv
 log_summary.txt
 *.csv
+training_data
+real_*
+training_*
