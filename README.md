@@ -9,30 +9,11 @@
 https://www.python.org/downloads/release/python-3100/
 2. 升級 pip 到最新版本
 python -m pip install --upgrade pip
-3. 在虛擬環境中安裝 TensorFlow、Pillow 和 NumPy
+3. 安裝 Playwright
+pip install playwright
+playwright install
+4. 在虛擬環境中安裝 TensorFlow、Pillow 和 NumPy
 pip install tensorflow==2.15.0 pillow numpy
-4. 執行腳本
-python image_cleanup.py
+5. 執行腳本
+python image_processing.py
 
-## 估算評分
-### 搜索和收集（30 分）
-- 關鍵字搜索和結果相關性：15 分
-  - 優良：使用精確關鍵字，獲得90%以上相關圖像。
-- 收集圖像的網址和替代文字：15 分
-  - 優良：所有圖像的 src 和 alt 信息完整、正確。
-### 圖像下載和處理（50 分）
-- 下載和儲檔：20 分
-  - 優良：成功下載 3000 至 5000 個圖像，並正確儲存在相應的文件夾。
-- 調整和裁剪：20 分
-  - 優良：所有圖像正確調整和裁剪為不超過 500x500 像素。
-- 重新編碼和尺寸控制：10 分
-  - 優良：所有圖像重新編碼為 JPEG，質量 50-80，大小不超過 50KB。
-### 自動化和代碼質量（20 分）
-- 自動化程度：10 分
-  - 優良：完全自動化，無需人工干預。
-- 程式碼結構和註釋：10 分
-  - 優良：代碼結構清晰，模組化良好，註釋詳盡。
-- 提交
-  - 已將源代碼、數據庫、和下載了的圖像壓縮成 ZIP 檔案。
-  - 已確保所有更改都已提交並註釋清楚。
-  - 已包含程序輸出的截圖或輸出日誌文件。
