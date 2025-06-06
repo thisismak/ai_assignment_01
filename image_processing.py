@@ -2,6 +2,7 @@ import os
 import sqlite3
 import requests
 import logging
+from logging.handlers import RotatingFileHandler
 import csv
 import random
 from urllib.parse import urlparse
@@ -17,10 +18,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 import subprocess
 
-# 配置日誌記錄
+# 配置日誌記錄（使用輪轉，限制文件大小）
+handler = RotatingFileHandler('image_processing.log', maxBytes=10*1024*1024, backupCount=5)
 logging.basicConfig(
-    filename='image_processing.log',
-    level=logging.INFO,
+    handlers=[handler],
+    level=logging.WARNING,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
@@ -31,12 +33,12 @@ DB_NAME = "dog_images.db"
 TARGET_IMAGE_COUNT_MIN = 1000
 TARGET_IMAGE_COUNT_MAX = 5000
 IMAGES_PER_BREED = 400
-MAX_IMAGE_SIZE = 100 * 1024
+MAX_IMAGE_SIZE = 200 * 1024  # 增加到 200KB
 QUALITY_RANGE = (40, 90)
 IMAGE_SIZE = (500, 500)
 CLASSIFIER_IMAGE_SIZE = (224, 224)
 MAX_IMAGES_PER_KEYWORD = 1000
-TRAINING_IMAGES_PER_CLASS = 100  # 每個類別（真實狗、非真實狗）收集100張圖片
+TRAINING_IMAGES_PER_CLASS = 500  # 增加到 500 張
 
 # 狗品種列表
 DOG_BREEDS = [
@@ -130,7 +132,7 @@ class ImageCollector:
         if len(alt.strip()) < 3:
             logging.warning(f"Filtered out image with short alt text: {alt}")
             return False
-        blacklist = ["cartoon", "tattoo", "illustration", "drawing", "animated", "artwork"]
+        blacklist = ["cartoon", "tattoo"]  # 縮減黑名單
         if any(keyword in alt.lower() for keyword in blacklist):
             logging.warning(f"Filtered out image with blacklisted alt text: {alt}")
             return False
@@ -202,7 +204,7 @@ class ImageCollector:
         total_empty_alt_count = 0
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
-            page = browser.new_page()
+            page = browser.new_page(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/91.0.4472.124")
             try:
                 google_images, google_empty_alt = self.collect_image_urls_google(page, keyword, int(max_images * 2))
                 images.extend(google_images)
@@ -222,10 +224,16 @@ class ImageCollector:
         """下載圖片並保存到本地"""
         for attempt in range(3):
             try:
-                response = requests.get(url, timeout=15)
+                response = requests.get(url, timeout=30)
                 if response.status_code == 200:
+                    img_data = response.content
+                    try:
+                        Image.open(io.BytesIO(img_data)).verify()
+                    except Exception as e:
+                        logging.error(f"Invalid image file from {url}: {str(e)}")
+                        return False
                     with open(filename, "wb") as f:
-                        f.write(response.content)
+                        f.write(img_data)
                     return True
                 else:
                     logging.warning(f"Attempt {attempt+1}: Failed to download {url}: Status code {response.status_code}")
@@ -238,6 +246,9 @@ class ImageCollector:
         """調整圖片大小、裁剪並壓縮為 JPEG"""
         try:
             with Image.open(input_path) as img:
+                if img.format not in ['JPEG', 'PNG', 'WEBP']:
+                    logging.error(f"Unsupported format for {input_path}: {img.format}")
+                    return False
                 img = img.convert("RGB")
                 img.thumbnail(IMAGE_SIZE, Image.Resampling.LANCZOS)
                 width, height = img.size
@@ -265,14 +276,15 @@ class ImageCollector:
     def collect_training_data(self, keyword, max_images):
         """收集訓練數據並保存到指定目錄"""
         images, empty_alt_count = self.collect_image_urls(keyword, max_images)
-        for i, (url, _) in enumerate(images):
+        for i, (url, alt) in enumerate(images):
             filename = os.path.join(self.output_dir, f"{keyword.replace(' ', '_')}_{i}.jpg")
             if not self.download_image(url, filename):
-                self.failure_log.append([keyword, url, "N/A", "download", "Failed after 3 attempts"])
+                self.failure_log.append([keyword, url, alt, "download", "Failed after 3 attempts"])
                 continue
             if not self.process_image(filename, filename):
-                self.failure_log.append([keyword, url, "N/A", "processing", "Compression or processing error"])
-                os.remove(filename) if os.path.exists(filename) else None
+                self.failure_log.append([keyword, url, alt, "processing", "Compression or processing error"])
+                if os.path.exists(filename):
+                    os.remove(filename)
                 continue
             logging.info(f"Collected and processed training image: {filename} for keyword: {keyword}")
     
@@ -309,23 +321,25 @@ class ImageCollector:
                     if not self.process_image(temp_filename, filename):
                         process_failed += 1
                         self.failure_log.append([keyword, url, alt, "processing", "Compression or processing error"])
-                        os.remove(temp_filename) if os.path.exists(temp_filename) else None
+                        if os.path.exists(temp_filename):
+                            os.remove(temp_filename)
                         continue
-                    self.db_manager.cursor.execute(
-                        "INSERT OR IGNORE INTO images (url, alt_text, filename, breed) VALUES (?, ?, ?, ?)",
-                        (url, alt, filename, breed)
-                    )
-                    if self.db_manager.cursor.rowcount == 0:
-                        duplicate_urls += 1
-                        self.failure_log.append([keyword, url, alt, "database", "Duplicate URL"])
-                    else:
+                    try:
+                        self.db_manager.cursor.execute(
+                            "INSERT INTO images (url, alt_text, filename, breed) VALUES (?, ?, ?, ?)",
+                            (url, alt, filename, breed)
+                        )
+                        self.db_manager.conn.commit()
                         total_images += 1
                         breed_counts[breed] += 1
-                        logging.info(f"Successfully processed image: {filename} for breed: {breed}")
-                    os.remove(temp_filename) if os.path.exists(temp_filename) else None
-                self.db_manager.conn.commit()
+                        logging.info(f"Successfully processed and inserted image: {filename} for breed: {breed}")
+                    except sqlite3.Error as e:
+                        duplicate_urls += 1
+                        self.failure_log.append([keyword, url, alt, "database", f"Database error: {str(e)}"])
+                    if os.path.exists(temp_filename):
+                        os.remove(temp_filename)
                 logging.info(f"Completed keyword {keyword}, total images: {total_images}, breed {breed}: {breed_counts[breed]}")
-        
+        logging.info(f"Total images in database after collection: {self.db_manager.get_image_count()}")
         return total_images, filtered_out_alt, download_failed, process_failed, duplicate_urls, breed_counts
 
 class ImageClassifier:
@@ -419,9 +433,9 @@ class ImageClassifier:
             if img_array is None:
                 return False
             pred = self.model.predict(img_array)[0][0]
-            if 0.5 <= pred < 0.6:
+            if 0.3 <= pred < 0.4:
                 logging.warning(f"Low confidence real dog image: {image_path}, prob: {pred}")
-            return pred > 0.5
+            return pred > 0.3  # 降低閾值
         except Exception as e:
             logging.error(f"圖片分類失敗 {image_path}: {str(e)}")
             return False
@@ -440,6 +454,10 @@ class DatasetCleaner:
         hashes = {}
         duplicates = []
         for filename in image_files:
+            if not os.path.exists(filename):
+                logging.error(f"File not found: {filename}")
+                self.failure_log.append(["N/A", filename, "N/A", "duplicate_detection", "File not found"])
+                continue
             try:
                 with Image.open(filename) as img:
                     img = img.resize((8, 8), Image.Resampling.LANCZOS).convert('L')
@@ -462,15 +480,17 @@ class DatasetCleaner:
         removed_count = 0
         cartoon_tattoo_count = 0
         image_files = [os.path.join(self.output_dir, row[3]) for row in images]
+        logging.info(f"Checking files: {image_files[:5]}")
         
         duplicates = self.detect_duplicates(image_files)
         for dup in duplicates:
-            image_id = next(row[0] for row in images if os.path.join(self.output_dir, row[3]) == dup)
-            self.db_manager.delete_image(image_id)
-            if os.path.exists(dup):
-                os.remove(dup)
-            removed_count += 1
-            self.failure_log.append(["N/A", dup, "N/A", "duplicate_removal", "Duplicate image"])
+            image_id = next((row[0] for row in images if os.path.join(self.output_dir, row[3]) == dup), None)
+            if image_id:
+                self.db_manager.delete_image(image_id)
+                if os.path.exists(dup):
+                    os.remove(dup)
+                removed_count += 1
+                self.failure_log.append(["N/A", dup, "N/A", "duplicate_removal", "Duplicate image"])
         
         for image_id, url, alt_text, filename, breed in images:
             file_path = os.path.join(self.output_dir, filename)
@@ -512,7 +532,7 @@ class DatasetCleaner:
         breed_counts = {breed: 0 for breed in DOG_BREEDS}
         for breed in DOG_BREEDS:
             self.db_manager.cursor.execute("SELECT COUNT(*) FROM images WHERE breed = ?", (breed,))
-            breed_counts[breed] = self.cursor.fetchone()[0]
+            breed_counts[breed] = self.db_manager.cursor.fetchone()[0]
         
         report = {
             "初始圖片數": initial_count,
@@ -538,6 +558,8 @@ class DatasetCleaner:
             writer = csv.writer(f)
             writer.writerow(headers)
             writer.writerows(self.failure_log)
+            if not self.failure_log:
+                writer.writerow(["N/A", "N/A", "N/A", "N/A", "No failures recorded"])
         logging.info(f"導出失敗報告至 {filename}")
     
     def export_breed_distribution(self, breed_counts, filename="breed_distribution.csv"):
@@ -589,7 +611,7 @@ def main():
         non_real_dog_collector = ImageCollector(os.path.join(TRAINING_DATA_DIR, "non_real_dogs"), db_manager)
         non_real_dog_collector.collect_training_data("cartoon dog", max_images=TRAINING_IMAGES_PER_CLASS // 2)
         non_real_dog_collector.collect_training_data("dog tattoo", max_images=TRAINING_IMAGES_PER_CLASS // 2)
-        logging.info("訓練數據收集完成")
+        logging.info(f"訓練數據收集完成: real_dogs={len(os.listdir(os.path.join(TRAINING_DATA_DIR, 'real_dogs')))}, non_real_dogs={len(os.listdir(os.path.join(TRAINING_DATA_DIR, 'non_real_dogs')))}")
         
         # 初始化分類器並訓練
         classifier = ImageClassifier(train_data_dir=TRAINING_DATA_DIR)
@@ -634,6 +656,7 @@ def main():
         logging.error(f"主程序錯誤: {str(e)}")
         if cleaner is not None:
             cleaner.failure_log.append(["N/A", "N/A", "N/A", "main_loop", str(e)])
+        cleaner.export_failure_report()
     finally:
         if db_manager is not None:
             db_manager.close()

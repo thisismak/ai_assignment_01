@@ -1,0 +1,8 @@
+
+    [images]
+    id INTEGER PRIMARY KEY AUTOINCREMENT
+    url TEXT UNIQUE
+    alt_text TEXT
+    filename TEXT
+    breed TEXT
+    
