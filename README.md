@@ -11,5 +11,6 @@ https://www.python.org/downloads/release/python-3100/
 python -m pip install --upgrade pip
 3. 安裝依賴
 python -m pip install pillow tensorflow imagehash numpy requests playwright
+playwright install
 4. 運行程式
 python main.py
