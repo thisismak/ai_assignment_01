@@ -11,5 +11,10 @@ https://www.python.org/downloads/release/python-3100/
 python -m pip install --upgrade pip
 3. 安裝依賴
 python -m pip install pillow tensorflow imagehash numpy requests playwright
-4. 運行程式
+playwright install
+4. TensorFlow 2.16.1 is a stable version known to work with Python 3.10 on Windows.
+pip uninstall tensorflow
+pip install tensorflow==2.16.1
+pip show tensorflow
+5. 運行程式
 python main.py

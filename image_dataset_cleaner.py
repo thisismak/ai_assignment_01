@@ -1,4 +1,5 @@
 import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '0'  # Enable detailed TensorFlow logging
 import sqlite3
 import logging
 import csv
@@ -20,7 +21,8 @@ from uuid import uuid4
 logging.basicConfig(
     filename='dataset_cleaning.log',
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    encoding='utf-8'
 )
 
 # Configuration constants
@@ -30,7 +32,7 @@ TARGET_IMAGE_COUNT_MIN = 1000
 TARGET_IMAGE_COUNT_MAX = 2000
 CLEANED_DIR = "cleaned_dog_images"
 TEMP_DIR = "temp_images"
-MODEL_CONFIDENCE_THRESHOLD = 0.8  # Relaxed threshold for dog classification
+MODEL_CONFIDENCE_THRESHOLD = 0.6  # Relaxed threshold for dog classification
 HASH_SIZE = 8  # Size for perceptual hash
 PAGE_COUNT_LOG = "image_collection.log"  # Log file from Exercise 1
 
@@ -50,7 +52,6 @@ class DatasetCleaner:
         try:
             self.conn = sqlite3.connect(DB_NAME)
             self.cursor = self.conn.cursor()
-            # Ensure images table exists
             self.cursor.execute('''
                 CREATE TABLE IF NOT EXISTS images (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -80,21 +81,29 @@ class DatasetCleaner:
         try:
             if image_path.lower().endswith('.svg'):
                 logging.warning(f"Skipping SVG file: {image_path}")
+                self.failure_log.append(["N/A", "N/A", "N/A", "classification", f"SVG file: {image_path}"])
                 return False
             img = Image.open(image_path).convert('RGB')
             img = img.resize((224, 224), Image.Resampling.LANCZOS)
             img_array = img_to_array(img)
             img_array = np.expand_dims(img_array, axis=0)
             img_array = preprocess_input(img_array)
-            predictions = model.predict(img_array, verbose=0)
-            predicted_class = tf.keras.applications.imagenet_utils.decode_predictions(predictions, top=1)[0][0]
+            predictions = model.predict(img_array, batch_size=1, verbose=0)
+            decoded = tf.keras.applications.imagenet_utils.decode_predictions(predictions, top=1)
+            if not decoded or not decoded[0]:
+                logging.error(f"No predictions returned for {image_path}")
+                self.failure_log.append(["N/A", "N/A", "N/A", "classification", f"No predictions for {image_path}"])
+                return False
+            predicted_class = decoded[0][0]
             class_id, class_name, confidence = predicted_class
-            # Check if the predicted class is a dog (ImageNet classes 151-268 are dogs)
             is_dog = 151 <= int(class_id.split('_')[1]) <= 268 if class_id.startswith('n') else False
             logging.info(f"Image {image_path}: Classified as {class_name} (ID: {class_id}) with confidence {confidence}, is_dog: {is_dog}")
+            if not is_dog or confidence < MODEL_CONFIDENCE_THRESHOLD:
+                self.failure_log.append(["N/A", "N/A", "N/A", "classification", f"Classified as {class_name} with confidence {confidence}, is_dog: {is_dog}"])
             return is_dog and confidence >= MODEL_CONFIDENCE_THRESHOLD
         except Exception as e:
             logging.error(f"Error classifying {image_path}: {str(e)}")
+            self.failure_log.append(["N/A", "N/A", "N/A", "classification", f"Error classifying {image_path}: {str(e)}"])
             return False
 
     def compute_image_hash(self, image_path):
@@ -102,11 +111,13 @@ class DatasetCleaner:
         try:
             if image_path.lower().endswith('.svg'):
                 logging.warning(f"Skipping hash computation for SVG file: {image_path}")
+                self.failure_log.append(["N/A", "N/A", "N/A", "hashing", f"SVG file: {image_path}"])
                 return None
             with Image.open(image_path) as img:
                 return str(imagehash.average_hash(img, hash_size=HASH_SIZE))
         except Exception as e:
             logging.error(f"Error computing hash for {image_path}: {str(e)}")
+            self.failure_log.append(["N/A", "N/A", "N/A", "hashing", f"Error computing hash for {image_path}: {str(e)}"])
             return None
 
     def check_database(self):
@@ -147,38 +158,37 @@ class DatasetCleaner:
         cleaned_count = 0
         irrelevant_count = 0
         duplicate_count = 0
+        images_to_remove = []
 
         for img_id, url, alt_text, filename, breed in images:
             # Verify file exists
             if not os.path.exists(filename):
                 logging.warning(f"Image file {filename} not found for breed {breed}, URL: {url}")
                 self.failure_log.append([breed, url, alt_text, "file_missing", "File not found"])
-                self.cursor.execute("DELETE FROM images WHERE id = ?", (img_id,))
+                images_to_remove.append(img_id)
                 continue
 
             # Check if image is a dog
             if not self.is_dog_image(filename):
                 irrelevant_count += 1
                 self.failure_log.append([breed, url, alt_text, "classification", "Not classified as a dog image"])
-                logging.info(f"Removed {filename}: not a dog image")
-                os.remove(filename) if os.path.exists(filename) else None
-                self.cursor.execute("DELETE FROM images WHERE id = ?", (img_id,))
+                logging.info(f"Marked {filename} for removal: not a dog image")
+                images_to_remove.append(img_id)
                 continue
 
             # Check for duplicates using perceptual hash
             img_hash = self.compute_image_hash(filename)
             if img_hash is None:
+                irrelevant_count += 1
                 self.failure_log.append([breed, url, alt_text, "hashing", "Failed to compute hash"])
                 logging.warning(f"Failed to compute hash for {filename}")
-                os.remove(filename) if os.path.exists(filename) else None
-                self.cursor.execute("DELETE FROM images WHERE id = ?", (img_id,))
+                images_to_remove.append(img_id)
                 continue
             if img_hash in self.image_hashes:
                 duplicate_count += 1
                 self.failure_log.append([breed, url, alt_text, "duplicate", f"Duplicate of {self.image_hashes[img_hash]}"])
-                logging.info(f"Removed {filename}: duplicate of {self.image_hashes[img_hash]}")
-                os.remove(filename) if os.path.exists(filename) else None
-                self.cursor.execute("DELETE FROM images WHERE id = ?", (img_id,))
+                logging.info(f"Marked {filename} for removal: duplicate of {self.image_hashes[img_hash]}")
+                images_to_remove.append(img_id)
                 continue
             self.image_hashes[img_hash] = filename
 
@@ -191,7 +201,7 @@ class DatasetCleaner:
             except OSError as e:
                 logging.error(f"Error moving file {filename} to {cleaned_filename}: {str(e)}")
                 self.failure_log.append([breed, url, alt_text, "file_move", str(e)])
-                self.cursor.execute("DELETE FROM images WHERE id = ?", (img_id,))
+                images_to_remove.append(img_id)
                 continue
 
             self.breed_counts[breed] += 1
@@ -202,11 +212,18 @@ class DatasetCleaner:
             domain = parsed_url.netloc
             self.unique_domains.add(domain)
 
+        # Remove invalid images
+        for img_id in images_to_remove:
+            self.cursor.execute("DELETE FROM images WHERE id = ?", (img_id,))
+            filename = next((img[3] for img in images if img[0] == img_id), None)
+            if filename and os.path.exists(filename):
+                os.remove(filename)
+
         self.conn.commit()
         logging.info(f"Cleaned dataset: {cleaned_count} images kept, {irrelevant_count} irrelevant, {duplicate_count} duplicates")
         return cleaned_count, irrelevant_count, duplicate_count
 
-    def supplement_images(self, target_min, target_max, original_script):
+    def supplement_images(self, target_min, target_max):
         """Supplement dataset if cleaned count is below target minimum."""
         cleaned_count, _, _ = self.clean_dataset()
         if cleaned_count >= target_min:
@@ -218,12 +235,12 @@ class DatasetCleaner:
             logging.info(f"Successfully ran script.py to supplement images: {result.stdout}")
             self.conn.commit()
             return self.clean_dataset()[0]  # Re-clean after supplementing
-        except subprocess.CalledProcessError as e:
+        except subprocess.CalledError as e:
             logging.error(f"Failed to run script.py for supplementing: {e.stderr}")
             self.failure_log.append(["N/A", "N/A", "N/A", "supplement", f"Subprocess error: {e.stderr}"])
             return cleaned_count
         except Exception as e:
-            logging.error(f"Error supplementing images: {str(e)}")
+            logging.error(f"Error supplementing images: {e}")
             self.failure_log.append(["N/A", "N/A", "N/A", "supplement", str(e)])
             return cleaned_count
 
@@ -231,7 +248,7 @@ class DatasetCleaner:
         """Count the number of pages crawled from the log file."""
         try:
             if os.path.exists(PAGE_COUNT_LOG):
-                with open(PAGE_COUNT_LOG, 'r', encoding='utf-8') as f:
+                with open(PAGE_COUNT_LOG, 'r', encoding='utf-8', errors='ignore') as f:
                     log_content = f.read()
                     self.page_count = len(re.findall(r'Searching (Google|Bing) for keyword', log_content))
                 logging.info(f"Total pages crawled: {self.page_count}")
@@ -298,14 +315,13 @@ def main():
     try:
         cleaner.count_pages()
         cleaned_count, irrelevant_count, duplicate_count = cleaner.clean_dataset()
-        cleaner.generate_report(cleaned_count, irrelevant_count, duplicate_count)  # Always generate report
+        if cleaned_count < TARGET_IMAGE_COUNT_MIN:
+            cleaned_count = cleaner.supplement_images(TARGET_IMAGE_COUNT_MIN, TARGET_IMAGE_COUNT_MAX)
+        cleaner.generate_report(cleaned_count, irrelevant_count, duplicate_count)
         if cleaned_count == 0:
             print("清理失敗：數據庫為空或無有效圖像數據。請先運行 script.py 收集圖像。")
             logging.error("Cleaning aborted due to empty dataset or database error.")
             return
-        if cleaned_count < TARGET_IMAGE_COUNT_MIN:
-            cleaned_count = cleaner.supplement_images(TARGET_IMAGE_COUNT_MIN, TARGET_IMAGE_COUNT_MAX, None)
-            cleaner.generate_report(cleaned_count, irrelevant_count, duplicate_count)  # Generate report after supplementing
         logging.info("Dataset cleaning and reporting completed")
         print(f"數據集清理完成：")
         print(f"原始圖像數量：{cleaner.cursor.execute('SELECT COUNT(*) FROM images').fetchone()[0]}")
@@ -318,7 +334,7 @@ def main():
     except Exception as e:
         logging.error(f"Error in main: {str(e)}")
         print(f"程式執行失敗：{str(e)}")
-        cleaner.generate_report(cleaned_count, irrelevant_count, duplicate_count)  # Generate report on failure
+        cleaner.generate_report(cleaned_count, irrelevant_count, duplicate_count)
     finally:
         cleaner.close()
 

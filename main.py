@@ -21,8 +21,23 @@ DB_NAME = "dog_images.db"
 OUTPUT_DIR = "dog_images"
 CLEANED_DIR = "cleaned_dog_images"
 PAGE_COUNT_LOG = "image_collection.log"
-EXPECTED_SCRIPT_IMAGES = (3000, 5000)  # Expected range for script.py
-EXPECTED_CLEANED_IMAGES = (1000, 2000)  # Expected range for image_dataset_cleaner.py
+EXPECTED_SCRIPT_IMAGES = (3000, 5000)
+EXPECTED_CLEANED_IMAGES = (1000, 2000)
+
+def check_python_environment():
+    """Check Python environment and TensorFlow installation."""
+    try:
+        import tensorflow as tf
+        logging.info(f"TensorFlow version {tf.__version__} found")
+        return True
+    except ImportError as e:
+        logging.error(f"TensorFlow import failed: {str(e)}")
+        print(f"錯誤：無法導入 TensorFlow: {str(e)}")
+        return False
+    except Exception as e:
+        logging.error(f"Unexpected error checking TensorFlow: {str(e)}")
+        print(f"錯誤：檢查 TensorFlow 時發生意外錯誤: {str(e)}")
+        return False
 
 def check_dependencies():
     """Check if required Python modules are installed."""
@@ -51,8 +66,7 @@ def check_dependencies():
             print("playwright 還需要額外安裝瀏覽器依賴：")
             print("playwright install")
         return False
-    logging.info("All required modules are installed")
-    return True
+    return check_python_environment()
 
 def count_images(directory):
     """Count the number of image files in a directory."""
@@ -109,7 +123,7 @@ def validate_db_files(db_name, image_dir):
 def log_and_print_stats(script_name, image_dir, expected_range):
     """Log and print image and DB record counts."""
     image_count = count_images(image_dir)
-    db_count = count_db_records(DB_NAME)  # Fixed: Changed db_name to DB_NAME
+    db_count = count_db_records(DB_NAME)
     logging.info(f"{script_name} 執行結果：")
     logging.info(f"- 圖像數量（{image_dir}）：{image_count}")
     logging.info(f"- SQL 記錄數量（{DB_NAME}）：{db_count}")
@@ -170,14 +184,12 @@ def check_prerequisites():
         logging.warning(f"Log file {PAGE_COUNT_LOG} not found. Page count will be set to 0.")
         print(f"警告：日誌文件 {PAGE_COUNT_LOG} 不存在。爬取頁數將設為 0。")
     
-    # Check if database has records
     db_count = count_db_records(DB_NAME)
     if db_count == 0:
         logging.error("No records in images table. Please ensure script.py generates data.")
         print("錯誤：數據庫 images 表無記錄。請確保 script.py 成功生成數據。")
         return False
     
-    # Validate database files
     if not validate_db_files(DB_NAME, OUTPUT_DIR):
         logging.error("Database contains references to missing image files. Cleaning may fail.")
         print("錯誤：數據庫包含缺失圖像文件的引用，清理可能失敗。")
@@ -192,10 +204,10 @@ def main():
     print(f"使用 Python 版本：{sys.version}")
     print(f"Python 可執行路徑：{sys.executable}")
 
-    # Check dependencies
+    # Check dependencies and environment
     if not check_dependencies():
-        logging.error("Aborting due to missing dependencies")
-        print("因缺少依賴而中止")
+        logging.error("Aborting due to missing dependencies or environment issues")
+        print("因缺少依賴或環境問題而中止")
         return
 
     # Check if script files exist
@@ -246,7 +258,7 @@ def main():
     print(f"- 原始圖像目錄：{OUTPUT_DIR}")
     print(f"- 清理後圖像目錄：{CLEANED_DIR}")
     print(f"- 報告文件：dataset_report.csv, cleaned_breed_distribution.csv, cleaning_failure_report.csv")
-    print(f"- 日誌文件：main.log, image_collection.log, dataset_cleaning.log")
+    print(f"- oyster files：main.log, image_collection.log, dataset_cleaning.log")
 
 if __name__ == "__main__":
     main()
