@@ -58,6 +58,7 @@ def count_images(directory):
     """Count the number of image files in a directory."""
     try:
         if not os.path.exists(directory):
+            logging.warning(f"Directory {directory} does not exist")
             return 0
         return len([f for f in os.listdir(directory) if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
     except Exception as e:
@@ -69,9 +70,15 @@ def count_db_records(db_name):
     try:
         conn = sqlite3.connect(db_name)
         cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='images'")
+        if not cursor.fetchone():
+            logging.error(f"No 'images' table found in {db_name}")
+            conn.close()
+            return 0
         cursor.execute("SELECT COUNT(*) FROM images")
         count = cursor.fetchone()[0]
         conn.close()
+        logging.info(f"Database {db_name} contains {count} records")
         return count
     except sqlite3.OperationalError as e:
         logging.error(f"Database error counting records: {str(e)}")
@@ -80,10 +87,29 @@ def count_db_records(db_name):
         logging.error(f"Unexpected error counting DB records: {str(e)}")
         return 0
 
+def validate_db_files(db_name, image_dir):
+    """Validate that database records have corresponding image files."""
+    try:
+        conn = sqlite3.connect(db_name)
+        cursor = conn.cursor()
+        cursor.execute("SELECT filename FROM images")
+        files = cursor.fetchall()
+        conn.close()
+        missing_files = [f[0] for f in files if not os.path.exists(f[0])]
+        if missing_files:
+            logging.warning(f"Found {len(missing_files)} missing image files in {image_dir}")
+            for f in missing_files[:5]:
+                logging.warning(f"Missing file: {f}")
+            print(f"警告：找到 {len(missing_files)} 個缺失的圖像文件，示例：{missing_files[:5]}")
+        return len(missing_files) == 0
+    except Exception as e:
+        logging.error(f"Error validating database files: {str(e)}")
+        return False
+
 def log_and_print_stats(script_name, image_dir, expected_range):
     """Log and print image and DB record counts."""
     image_count = count_images(image_dir)
-    db_count = count_db_records(DB_NAME)
+    db_count = count_db_records(DB_NAME)  # Fixed: Changed db_name to DB_NAME
     logging.info(f"{script_name} 執行結果：")
     logging.info(f"- 圖像數量（{image_dir}）：{image_count}")
     logging.info(f"- SQL 記錄數量（{DB_NAME}）：{db_count}")
@@ -149,6 +175,12 @@ def check_prerequisites():
     if db_count == 0:
         logging.error("No records in images table. Please ensure script.py generates data.")
         print("錯誤：數據庫 images 表無記錄。請確保 script.py 成功生成數據。")
+        return False
+    
+    # Validate database files
+    if not validate_db_files(DB_NAME, OUTPUT_DIR):
+        logging.error("Database contains references to missing image files. Cleaning may fail.")
+        print("錯誤：數據庫包含缺失圖像文件的引用，清理可能失敗。")
         return False
     
     return True
