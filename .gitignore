@@ -1,4 +1,6 @@
 dog_images
+cleaned_dog_images
+temp_images
 *.db
 *.log
 .venv

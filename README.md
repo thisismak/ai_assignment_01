@@ -9,11 +9,7 @@
 https://www.python.org/downloads/release/python-3100/
 2. 升級 pip 到最新版本
 python -m pip install --upgrade pip
-3. 安裝 Playwright
-pip install playwright
-4. 在虛擬環境中安裝 TensorFlow、Pillow 和 NumPy
-pip install tensorflow==2.12.0 pillow==9.5.0 requests==2.31.0 playwright==1.44.0 numpy==1.23.5 matplotlib==3.7.1
-playwright install chromium
-5. 執行腳本
-python image_processing.py
-
+3. 安裝依賴
+python -m pip install pillow tensorflow imagehash numpy requests playwright
+4. 運行程式
+python main.py
