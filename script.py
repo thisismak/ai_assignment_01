@@ -1,7 +1,7 @@
 import os
 import sqlite3
 import requests
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 from PIL import Image
 import io
 import logging
@@ -27,7 +27,10 @@ IMAGES_PER_BREED = 400  # Limit per breed
 MAX_IMAGE_SIZE = 100 * 1024  # 100KB to reduce compression failures
 QUALITY_RANGE = (40, 90)      # Broader quality range
 IMAGE_SIZE = (500, 500)
-MAX_IMAGES_PER_KEYWORD = 1000  # Increased for efficiency
+MAX_IMAGES_PER_KEYWORD = 500  # Reduced to prevent browser overload
+NAVIGATION_TIMEOUT = 90000    # Increased to 90 seconds
+LOAD_STATE_TIMEOUT = 45000    # Increased to 45 seconds
+RETRY_ATTEMPTS = 3            # Retry attempts for failed searches
 
 # List of dog breeds
 DOG_BREEDS = [
@@ -35,9 +38,14 @@ DOG_BREEDS = [
     "Shih Tzu", "Poodle", "Dachshund", "Shiba Inu", "Labrador Retriever"
 ]
 
-# Create output directory
+# Create output directory and breed-specific subdirectories
 if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR)
+for breed in DOG_BREEDS:
+    breed_dir = os.path.join(OUTPUT_DIR, breed.replace(' ', '_'))
+    if not os.path.exists(breed_dir):
+        os.makedirs(breed_dir)
+        logging.info(f"Created directory for breed: {breed_dir}")
 
 def init_database():
     """Initialize SQLite database to store image metadata."""
@@ -78,72 +86,111 @@ def filter_alt_text(alt):
     return True
 
 def collect_image_urls_google(page, keyword, max_images):
-    """Collect image URLs and alt texts from Google Images."""
-    images = []
-    empty_alt_count = 0
-    try:
-        logging.info(f"Searching Google for keyword: {keyword}")
-        page.goto(f"https://www.google.com/search?tbm=isch&q={keyword}", timeout=60000)
-        page.wait_for_load_state("networkidle", timeout=30000)
-        last_height = page.evaluate("document.body.scrollHeight")
-        while len(images) < max_images:
-            image_elements = page.query_selector_all("img")
-            for img in image_elements:
-                src = img.get_attribute("src") or img.get_attribute("data-src")
-                alt = img.get_attribute("alt") or ""
-                if src and src.startswith("http"):
-                    if filter_alt_text(alt) and (src, alt) not in images:
-                        images.append((src, alt))
-                    else:
-                        empty_alt_count += 1
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            page.wait_for_timeout(random.uniform(500, 1500))  # Reduced for efficiency
-            new_height = page.evaluate("document.body.scrollHeight")
-            if new_height == last_height:
-                break
-            last_height = new_height
-        logging.info(f"Collected {len(images)} images from Google for {keyword}, skipped {empty_alt_count} empty/invalid alt texts")
-    except Exception as e:
-        logging.error(f"Error collecting images from Google for {keyword}: {str(e)}")
-    return images, empty_alt_count
+    """Collect image URLs and alt texts from Google Images with retries."""
+    for attempt in range(RETRY_ATTEMPTS):
+        images = []
+        empty_alt_count = 0
+        try:
+            logging.info(f"Attempt {attempt+1}: Searching Google for keyword: {keyword}")
+            page.goto(f"https://www.google.com/search?tbm=isch&q={keyword}", timeout=NAVIGATION_TIMEOUT)
+            page.wait_for_load_state("networkidle", timeout=LOAD_STATE_TIMEOUT)
+            last_height = page.evaluate("document.body.scrollHeight")
+            while len(images) < max_images:
+                image_elements = page.query_selector_all("img")
+                for img in image_elements:
+                    try:
+                        src = img.get_attribute("src") or img.get_attribute("data-src")
+                        alt = img.get_attribute("alt") or ""
+                        if src and src.startswith("http"):
+                            if filter_alt_text(alt) and (src, alt) not in images:
+                                images.append((src, alt))
+                            else:
+                                empty_alt_count += 1
+                    except Exception as e:
+                        logging.warning(f"Error getting attributes for an image: {str(e)}")
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                page.wait_for_timeout(random.uniform(1000, 2000))  # Increased delay
+                new_height = page.evaluate("document.body.scrollHeight")
+                if new_height == last_height:
+                    break
+                last_height = new_height
+            logging.info(f"Attempt {attempt+1}: Collected {len(images)} images from Google for {keyword}, skipped {empty_alt_count} empty/invalid alt texts")
+            return images, empty_alt_count
+        except PlaywrightTimeoutError as e:
+            logging.error(f"Attempt {attempt+1}: Timeout in Google search for {keyword}: {str(e)}")
+            if attempt < RETRY_ATTEMPTS - 1:
+                logging.info(f"Retrying Google search for {keyword}")
+                page.reload(timeout=NAVIGATION_TIMEOUT)
+                continue
+            logging.error(f"Failed Google search for {keyword} after {RETRY_ATTEMPTS} attempts")
+            return [], empty_alt_count
+        except Exception as e:
+            logging.error(f"Attempt {attempt+1}: Error collecting images from Google for {keyword}: {str(e)}")
+            if attempt < RETRY_ATTEMPTS - 1:
+                logging.info(f"Retrying Google search for {keyword}")
+                page.reload(timeout=NAVIGATION_TIMEOUT)
+                continue
+            return [], empty_alt_count
+    return [], empty_alt_count
 
 def collect_image_urls_bing(page, keyword, max_images):
-    """Collect image URLs and alt texts from Bing Images."""
-    images = []
-    empty_alt_count = 0
-    try:
-        logging.info(f"Searching Bing for keyword: {keyword}")
-        page.goto(f"https://www.bing.com/images/search?q={keyword}", timeout=60000)
-        page.wait_for_load_state("networkidle", timeout=30000)
-        last_height = page.evaluate("document.body.scrollHeight")
-        while len(images) < max_images:
-            image_elements = page.query_selector_all("img")
-            for img in image_elements:
-                src = img.get_attribute("src") or img.get_attribute("data-src")
-                alt = img.get_attribute("alt") or ""
-                if src and src.startswith("http"):
-                    if filter_alt_text(alt) and (src, alt) not in images:
-                        images.append((src, alt))
-                    else:
-                        empty_alt_count += 1
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            page.wait_for_timeout(random.uniform(500, 1500))  # Reduced for efficiency
-            new_height = page.evaluate("document.body.scrollHeight")
-            if new_height == last_height:
-                break
-            last_height = new_height
-        logging.info(f"Collected {len(images)} images from Bing for {keyword}, skipped {empty_alt_count} empty/invalid alt texts")
-    except Exception as e:
-        logging.error(f"Error collecting images from Bing for {keyword}: {str(e)}")
-    return images, empty_alt_count
+    """Collect image URLs and alt texts from Bing Images with retries."""
+    for attempt in range(RETRY_ATTEMPTS):
+        images = []
+        empty_alt_count = 0
+        try:
+            logging.info(f"Attempt {attempt+1}: Searching Bing for keyword: {keyword}")
+            page.goto(f"https://www.bing.com/images/search?q={keyword}", timeout=NAVIGATION_TIMEOUT)
+            page.wait_for_load_state("networkidle", timeout=LOAD_STATE_TIMEOUT)
+            last_height = page.evaluate("document.body.scrollHeight")
+            while len(images) < max_images:
+                image_elements = page.query_selector_all("img")
+                for img in image_elements:
+                    try:
+                        src = img.get_attribute("src") or img.get_attribute("data-src")
+                        alt = img.get_attribute("alt") or ""
+                        if src and src.startswith("http"):
+                            if filter_alt_text(alt) and (src, alt) not in images:
+                                images.append((src, alt))
+                            else:
+                                empty_alt_count += 1
+                    except Exception as e:
+                        logging.warning(f"Error getting attributes for an image: {str(e)}")
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                page.wait_for_timeout(random.uniform(1000, 2000))  # Increased delay
+                new_height = page.evaluate("document.body.scrollHeight")
+                if new_height == last_height:
+                    break
+                last_height = new_height
+            logging.info(f"Attempt {attempt+1}: Collected {len(images)} images from Bing for {keyword}, skipped {empty_alt_count} empty/invalid alt texts")
+            return images, empty_alt_count
+        except PlaywrightTimeoutError as e:
+            logging.error(f"Attempt {attempt+1}: Timeout in Bing search for {keyword}: {str(e)}")
+            if attempt < RETRY_ATTEMPTS - 1:
+                logging.info(f"Retrying Bing search for {keyword}")
+                page.reload(timeout=NAVIGATION_TIMEOUT)
+                continue
+            logging.error(f"Failed Bing search for {keyword} after {RETRY_ATTEMPTS} attempts")
+            return [], empty_alt_count
+        except Exception as e:
+            logging.error(f"Attempt {attempt+1}: Error collecting images from Bing for {keyword}: {str(e)}")
+            if attempt < RETRY_ATTEMPTS - 1:
+                logging.info(f"Retrying Bing search for {keyword}")
+                page.reload(timeout=NAVIGATION_TIMEOUT)
+                continue
+            return [], empty_alt_count
+    return [], empty_alt_count
 
 def collect_image_urls(playwright, keyword, max_images):
     """Collect images from Google and Bing, deduplicating results."""
-    browser = playwright.chromium.launch(headless=False)
-    page = browser.new_page()
     images = []
     total_empty_alt_count = 0
+    browser = None
     try:
+        browser = playwright.chromium.launch(headless=False)
+        # NEW: Use browser context for better resource management
+        context = browser.new_context()
+        page = context.new_page()
         google_images, google_empty_alt = collect_image_urls_google(page, keyword, int(max_images * 2))
         images.extend(google_images)
         total_empty_alt_count += google_empty_alt
@@ -152,11 +199,17 @@ def collect_image_urls(playwright, keyword, max_images):
         total_empty_alt_count += bing_empty_alt
         images = list(dict.fromkeys(images))  # Deduplicate
         logging.info(f"Total unique images collected for {keyword}: {len(images)}, total skipped alt texts: {total_empty_alt_count}")
+        return images[:max_images], total_empty_alt_count
     except Exception as e:
         logging.error(f"Error in collect_image_urls for {keyword}: {str(e)}")
+        return [], total_empty_alt_count
     finally:
-        browser.close()
-    return images[:max_images], total_empty_alt_count
+        if browser:
+            try:
+                context.close()
+                browser.close()
+            except Exception as e:
+                logging.error(f"Error closing browser: {str(e)}")
 
 def download_image(url, filename):
     """Download an image from a URL and save it locally with retries."""
@@ -251,8 +304,9 @@ def main():
                     for i, (url, alt) in enumerate(images):
                         if total_images >= TARGET_IMAGE_COUNT_MAX or breed_counts[breed] >= IMAGES_PER_BREED:
                             break
-                        filename = os.path.join(OUTPUT_DIR, f"{breed.replace(' ', '_')}_{total_images}.jpg")
-                        temp_filename = os.path.join(OUTPUT_DIR, f"temp_{total_images}.jpg")
+                        breed_dir = os.path.join(OUTPUT_DIR, breed.replace(' ', '_'))
+                        filename = os.path.join(breed_dir, f"{breed.replace(' ', '_')}_{breed_counts[breed]}_{total_images}.jpg")
+                        temp_filename = os.path.join(breed_dir, f"temp_{breed_counts[breed]}_{total_images}.jpg")
                         if not download_image(url, temp_filename):
                             download_failed += 1
                             failure_log.append([keyword, url, alt, "download", "Failed after 3 attempts"])
@@ -280,7 +334,6 @@ def main():
             # Second pass: supplement if total_images < TARGET_IMAGE_COUNT_MIN
             if total_images < TARGET_IMAGE_COUNT_MIN:
                 logging.info(f"Shortfall of {TARGET_IMAGE_COUNT_MIN - total_images} images, retrying underfilled breeds")
-                average_images = total_images // len(DOG_BREEDS)
                 underfilled_breeds = [breed for breed, count in breed_counts.items() if count < IMAGES_PER_BREED]
                 random.shuffle(underfilled_breeds)
                 for breed in underfilled_breeds:
@@ -291,12 +344,13 @@ def main():
                             break
                         logging.info(f"Supplementing keyword {keyword} for breed {breed}")
                         images, empty_alt_count = collect_image_urls(playwright, keyword, MAX_IMAGES_PER_KEYWORD)
-                        filtered_out_alt += empty_alt
+                        filtered_out_alt += empty_alt_count
                         for i, (url, alt) in enumerate(images):
                             if total_images >= TARGET_IMAGE_COUNT_MIN or breed_counts[breed] >= IMAGES_PER_BREED:
                                 break
-                            filename = os.path.join(OUTPUT_DIR, f"{breed.replace(' ', '_')}_{total_images}.jpg")
-                            temp_filename = os.path.join(OUTPUT_DIR, f"temp_{total_images}.jpg")
+                            breed_dir = os.path.join(OUTPUT_DIR, breed.replace(' ', '_'))
+                            filename = os.path.join(breed_dir, f"{breed.replace(' ', '_')}_{breed_counts[breed]}_{total_images}.jpg")
+                            temp_filename = os.path.join(breed_dir, f"temp_{breed_counts[breed]}_{total_images}.jpg")
                             if not download_image(url, temp_filename):
                                 download_failed += 1
                                 failure_log.append([keyword, url, alt, "download", "Failed after 3 attempts"])
