@@ -139,7 +139,7 @@ def collect_image_urls_bing(page, keyword, max_images):
 
 def collect_image_urls(playwright, keyword, max_images):
     """Collect images from Google and Bing, deduplicating results."""
-    browser = playwright.chromium.launch(headless=True)
+    browser = playwright.chromium.launch(headless=False)
     page = browser.new_page()
     images = []
     total_empty_alt_count = 0
