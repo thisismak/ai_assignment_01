@@ -17,4 +17,4 @@ pip uninstall tensorflow
 pip install tensorflow==2.16.1
 pip show tensorflow
 5. 運行程式
-python main.py
+python script.py
